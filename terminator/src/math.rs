@@ -35,6 +35,8 @@ pub fn obligation_info(address: &Pubkey, obligation: &Obligation) -> ObligationI
         (Fraction::ZERO, Fraction::ZERO)
     };
 
+    // info!("unhealthy_borrow_value_sf: {}", Fraction::from_bits(obligation.unhealthy_borrow_value_sf));
+
     ObligationInfo {
         borrowed_amount,
         deposited_amount,
@@ -57,22 +59,31 @@ pub fn print_obligation_stats(
     } = obl_info;
 
     let is_liquidatable = ltv > unhealthy_ltv;
-    let msg = format!(
+    let near_liquidatable = ltv > &(unhealthy_ltv * &Fraction::from_num(0.95));
+    let is_big_fish = borrowed_amount > &Fraction::from_num(10000);
+
+    let mut msg = format!(
         "{}/{} obligation: {}, healthy: {}, LTV: {:?}%/{:?}%, deposited: {} borrowed: {}",
         i + 1,
         num_obligations,
         address.to_string().green(),
         if is_liquidatable {
             "NO".red()
+        } else if near_liquidatable {
+            "NEAR".yellow()
         } else {
             "YES".green()
         },
         ltv * 100,
         unhealthy_ltv * 100,
         deposited_amount,
-        borrowed_amount
+        borrowed_amount,
     );
-    if is_liquidatable {
+    if is_big_fish {
+        msg.push_str(", BIG FISH");
+    }
+
+    if is_liquidatable || near_liquidatable {
         info!("{}", msg);
     } else {
         debug!("{}", msg);

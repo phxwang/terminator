@@ -688,8 +688,15 @@ async fn crank(klend_client: &KlendClient, obligation_filter: Option<Pubkey>) ->
             info!("Market accounts fetched in {}s", start.elapsed().as_secs());
 
             let mut reserves = market_accs.reserves.clone();
-            let lending_market = market_accs.lending_market;
+            let mut lending_market = market_accs.lending_market;
+
+            // info!("Lending market: {:?}", lending_market);
+            if lending_market.global_unhealthy_borrow_value == 0 {
+                lending_market.global_unhealthy_borrow_value = lending_market.global_allowed_borrow_value;
+            }
             // let obligations = obligations.clone();
+
+            // break;
 
             let OracleAccounts {
                 mut pyth_accounts,
@@ -718,7 +725,7 @@ async fn crank(klend_client: &KlendClient, obligation_filter: Option<Pubkey>) ->
                 // if reserve.config.status != ReserveStatus::Active as u8 {
                 //     continue;
                 // }
-                let ignore_tokens = ["EURC", "CHAI"];
+                let ignore_tokens = ["CHAI"];
                 if ignore_tokens.contains(&reserve.config.token_info.symbol()) {
                     continue;
                 }
@@ -760,7 +767,7 @@ async fn crank(klend_client: &KlendClient, obligation_filter: Option<Pubkey>) ->
                         continue;
                     }
                 }
-                info!("Processing obligation {:?}", address);
+                // info!("Processing obligation {:?}", address);
 
                 // Refresh the obligation
                 let ObligationReserves {
@@ -782,7 +789,7 @@ async fn crank(klend_client: &KlendClient, obligation_filter: Option<Pubkey>) ->
                     referrer_states.into_iter(),
                 )?;
 
-                info!("Refreshed obligation: {}", address.to_string().green());
+                // info!("Refreshed obligation: {}", address.to_string().green());
                 let obligation_stats = math::obligation_info(address, obligation);
                 math::print_obligation_stats(&obligation_stats, address, i, num_obligations);
 
