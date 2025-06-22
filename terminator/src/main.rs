@@ -697,7 +697,7 @@ async fn crank(klend_client: &KlendClient, obligation_filter: Option<Pubkey>) ->
                     //math::print_obligation_stats(obligation_stats, address, 0, 0);
 
                     //check if the obligation is liquidatable, then send the liquidation tx
-                    check_and_liquidate(klend_client, address, *obligation, &lending_market, &clock, &reserves, &rts).await;
+                    check_and_liquidate(klend_client, address, *obligation, &lending_market, &clock, &reserves, &rts).await?;
                 }
             }
 
@@ -752,7 +752,7 @@ async fn crank(klend_client: &KlendClient, obligation_filter: Option<Pubkey>) ->
                 }
                 Some(o) => vec![(obligation_filter.unwrap(), o)],
             };
-            let (rts, reserves, lending_market, clock) = refresh_market(klend_client, market).await;
+            let (rts, reserves, lending_market, clock) = refresh_market(klend_client, market).await?;
 
             // Refresh all obligations second
             let SplitObligations {
