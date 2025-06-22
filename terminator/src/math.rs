@@ -50,7 +50,7 @@ pub fn print_obligation_stats(
     address: &Pubkey,
     i: usize,
     num_obligations: usize,
-) {
+) -> (bool, bool, bool) {
     let ObligationInfo {
         borrowed_amount,
         deposited_amount,
@@ -88,6 +88,8 @@ pub fn print_obligation_stats(
     } else {
         debug!("{}", msg);
     }
+
+    (is_liquidatable, near_liquidatable, is_big_fish)
 }
 
 #[allow(clippy::too_many_arguments)]

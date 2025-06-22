@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use anchor_client::{solana_sdk::pubkey::Pubkey, Cluster};
 use anyhow::Result;
@@ -7,10 +7,11 @@ use colored::Colorize;
 use consts::WRAPPED_SOL_MINT;
 use itertools::Itertools;
 use juno::DecompiledVersionedTx;
-use kamino_lending::Reserve;
+use kamino_lending::{Reserve, Obligation, LendingMarket, ReferrerTokenState};
 use solana_sdk::{
     compute_budget::{self},
     signer::Signer,
+    clock::Clock,
 };
 use tokio::time::sleep;
 use tracing::{info, warn};
@@ -648,8 +649,71 @@ async fn liquidate(klend_client: &KlendClient, obligation: &Pubkey) -> Result<()
     Ok(())
 }
 
+async fn check_and_liquidate(klend_client: &KlendClient, address: &Pubkey, obligation: &mut Obligation, lending_market: &LendingMarket, clock: &Clock, reserves: &HashMap<Pubkey, Reserve>, rts: &HashMap<Pubkey, ReferrerTokenState>) -> Result<()> {
+    let ObligationReserves {
+        deposit_reserves,
+        borrow_reserves,
+    } = obligation_reserves(obligation, &reserves)?;
+
+    let referrer_states = referrer_token_states_of_obligation(
+        address,
+        obligation,
+        &borrow_reserves,
+        &rts,
+    )?;
+
+    kamino_lending::lending_market::lending_operations::refresh_obligation(
+        obligation,
+        &lending_market,
+        clock.slot,
+        deposit_reserves.into_iter(),
+        borrow_reserves.into_iter(),
+        referrer_states.into_iter(),
+    )?;
+
+    let obligation_stats = math::obligation_info(address, obligation);
+    if obligation_stats.ltv > obligation_stats.unhealthy_ltv {
+        //liquidate(klend_client, obligation).await?;
+        info!("Liquidating obligation {}", obligation.to_string().green());
+    }
+    Ok(())
+}
+
 async fn crank(klend_client: &KlendClient, obligation_filter: Option<Pubkey>) -> Result<()> {
     let sleep_duration = Duration::from_secs(10);
+
+    // 保存所有near liquidatable obligations的数组
+    let mut big_fish_near_liquidatable_obligations_map: std::collections::HashMap<&Pubkey, Vec<(&mut Pubkey, &mut Obligation)>> = HashMap::new();
+    let mut near_liquidatable_obligations_map: std::collections::HashMap<&Pubkey, Vec<(&mut Pubkey, &mut Obligation)>> = HashMap::new();
+
+    // 启动一个新的线程，扫描near_liquidatable_obligations和big_fish_near_liquidatable_obligations
+    let near_liquidatable_obligations_thread = tokio::spawn(async move {
+        loop {
+            for (market, big_fish_near_liquidatable_obligations) in big_fish_near_liquidatable_obligations_map.iter() {
+
+                let (rts, reserves, lending_market, clock) = refresh_market(klend_client, market).await?;
+
+                for (address, obligation) in big_fish_near_liquidatable_obligations.iter() {
+                    //math::print_obligation_stats(obligation_stats, address, 0, 0);
+
+                    //check if the obligation is liquidatable, then send the liquidation tx
+                    check_and_liquidate(klend_client, address, *obligation, &lending_market, &clock, &reserves, &rts).await;
+                }
+            }
+
+            //for (market, near_liquidatable_obligations) in near_liquidatable_obligations_map.iter() {
+            //    let (rts, reserves, lending_market, clock) = refresh_market(klend_client, market).await?;
+
+            //    for (address, obligation) in near_liquidatable_obligations.iter() {
+                    //math::print_obligation_stats(obligation_stats, address, 0, 0);
+
+                    //check if the obligation is liquidatable, then send the liquidation tx
+            //        check_and_liquidate(klend_client, address, obligation, &lending_market, &clock, &reserves, &rts).await?;
+            //    }
+            //}
+        }
+    });
+
     let (markets, ob) = match obligation_filter {
         None => {
             let lending_markets = get_lending_markets(&klend_client.program_id).await?;
@@ -664,11 +728,16 @@ async fn crank(klend_client: &KlendClient, obligation_filter: Option<Pubkey>) ->
     };
 
     loop {
+        let mut near_liquidatable_obligations_new_map = HashMap::new();
+        let mut big_fish_near_liquidatable_obligations_new_map = HashMap::new();
         for market in &markets {
             info!("{} cranking market", market.to_string().green());
             let st = std::time::Instant::now();
 
             let start = std::time::Instant::now();
+
+            let mut market_near_liquidatable_obligations = vec![];
+            let mut market_big_fish_near_liquidatable_obligations = vec![];
 
             // Reload accounts
             let obligations = match ob {
@@ -683,69 +752,7 @@ async fn crank(klend_client: &KlendClient, obligation_filter: Option<Pubkey>) ->
                 }
                 Some(o) => vec![(obligation_filter.unwrap(), o)],
             };
-            let market_accs = klend_client.fetch_market_and_reserves(market).await?;
-            let rts = klend_client.fetch_referrer_token_states().await?;
-            info!("Market accounts fetched in {}s", start.elapsed().as_secs());
-
-            let mut reserves = market_accs.reserves.clone();
-            let mut lending_market = market_accs.lending_market;
-
-            // info!("Lending market: {:?}", lending_market);
-            if lending_market.global_unhealthy_borrow_value == 0 {
-                lending_market.global_unhealthy_borrow_value = lending_market.global_allowed_borrow_value;
-            }
-            // let obligations = obligations.clone();
-
-            // break;
-
-            let OracleAccounts {
-                mut pyth_accounts,
-                mut switchboard_accounts,
-                mut scope_price_accounts,
-            } = oracle_accounts(&klend_client.client, &reserves)
-                .await
-                .unwrap();
-
-            let pyth_account_infos = map_accounts_and_create_infos(&mut pyth_accounts);
-            let switchboard_feed_infos = map_accounts_and_create_infos(&mut switchboard_accounts);
-            let scope_price_infos = map_accounts_and_create_infos(&mut scope_price_accounts);
-
-            let clock = sysvars::get_clock(&klend_client.client.client)
-                .await
-                .unwrap();
-
-            // Refresh all reserves first
-            for (key, reserve) in reserves.iter_mut() {
-                info!(
-                    "Refreshing reserve {} token {} with status {}",
-                    key.to_string().green(),
-                    reserve.config.token_info.symbol().purple(),
-                    reserve.config.status
-                );
-                // if reserve.config.status != ReserveStatus::Active as u8 {
-                //     continue;
-                // }
-                let ignore_tokens = ["CHAI"];
-                if ignore_tokens.contains(&reserve.config.token_info.symbol()) {
-                    continue;
-                }
-                if let Err(e) = reserve.last_update.slots_elapsed(clock.slot) {
-                    warn!(err = ?e,
-                        "RESERVE {:?} last updated slot is already ahead of the clock, skipping refresh",
-                        key,
-                    );
-                } else {
-                    operations::refresh_reserve(
-                        key,
-                        reserve,
-                        &lending_market,
-                        &clock,
-                        &pyth_account_infos,
-                        &switchboard_feed_infos,
-                        &scope_price_infos,
-                    )?;
-                }
-            }
+            let (rts, reserves, lending_market, clock) = refresh_market(klend_client, market).await;
 
             // Refresh all obligations second
             let SplitObligations {
@@ -791,20 +798,94 @@ async fn crank(klend_client: &KlendClient, obligation_filter: Option<Pubkey>) ->
 
                 // info!("Refreshed obligation: {}", address.to_string().green());
                 let obligation_stats = math::obligation_info(address, obligation);
-                math::print_obligation_stats(&obligation_stats, address, i, num_obligations);
+                let (is_liquidatable, near_liquidatable, is_big_fish) = math::print_obligation_stats(&obligation_stats, address, i, num_obligations);
 
-                if obligation_stats.ltv > obligation_stats.unhealthy_ltv {
+
+                if is_liquidatable {
                     unhealthy_obligations += 1;
                 } else {
+                    if near_liquidatable {
+                        if is_big_fish {
+                            market_big_fish_near_liquidatable_obligations.push((address, obligation));
+                        } else {
+                            market_near_liquidatable_obligations.push((address, obligation));
+                        }
+                    }
                     healthy_obligations += 1;
                 }
             }
+
+            near_liquidatable_obligations_new_map.insert(market, market_near_liquidatable_obligations);
+            big_fish_near_liquidatable_obligations_new_map.insert(market, market_big_fish_near_liquidatable_obligations);
 
             let en = st.elapsed().as_secs_f64();
             info!(
                 "{} evaluated {} total obligations {} with debt, {} healthy, {} unhealthy. Sleeping for {:?}, duration {:?}", market.to_string().green(), risky.len() + zero_debt.len(), num_obligations, healthy_obligations, unhealthy_obligations, sleep_duration, en
             );
         }
+
+        near_liquidatable_obligations_map = near_liquidatable_obligations_new_map;
+        big_fish_near_liquidatable_obligations_map = big_fish_near_liquidatable_obligations_new_map;
+
         sleep(sleep_duration).await;
     }
+}
+
+async fn refresh_market(klend_client: &KlendClient, market: &Pubkey)
+-> Result<(HashMap<Pubkey, ReferrerTokenState>,
+    HashMap<Pubkey, Reserve>,
+    LendingMarket,
+    Clock)> {
+    let market_accs = klend_client.fetch_market_and_reserves(market).await?;
+    let rts = klend_client.fetch_referrer_token_states().await?;
+    let mut reserves = market_accs.reserves.clone();
+    let mut lending_market = market_accs.lending_market;
+    if lending_market.global_unhealthy_borrow_value == 0 {
+        lending_market.global_unhealthy_borrow_value = lending_market.global_allowed_borrow_value;
+    }
+    let OracleAccounts {
+        mut pyth_accounts,
+        mut switchboard_accounts,
+        mut scope_price_accounts,
+    } = oracle_accounts(&klend_client.client, &reserves)
+        .await
+        .unwrap();
+    let pyth_account_infos = map_accounts_and_create_infos(&mut pyth_accounts);
+    let switchboard_feed_infos = map_accounts_and_create_infos(&mut switchboard_accounts);
+    let scope_price_infos = map_accounts_and_create_infos(&mut scope_price_accounts);
+    let clock = sysvars::get_clock(&klend_client.client.client)
+        .await
+        .unwrap();
+    for (key, reserve) in reserves.iter_mut() {
+        info!(
+            "Refreshing reserve {} token {} with status {}",
+            key.to_string().green(),
+            reserve.config.token_info.symbol().purple(),
+            reserve.config.status
+        );
+        // if reserve.config.status != ReserveStatus::Active as u8 {
+        //     continue;
+        // }
+        let ignore_tokens = ["CHAI"];
+        if ignore_tokens.contains(&reserve.config.token_info.symbol()) {
+            continue;
+        }
+        if let Err(e) = reserve.last_update.slots_elapsed(clock.slot) {
+            warn!(err = ?e,
+                "RESERVE {:?} last updated slot is already ahead of the clock, skipping refresh",
+                key,
+            );
+        } else {
+            operations::refresh_reserve(
+                key,
+                reserve,
+                &lending_market,
+                &clock,
+                &pyth_account_infos,
+                &switchboard_feed_infos,
+                &scope_price_infos,
+            )?;
+        }
+    }
+    Ok((rts, reserves, lending_market, clock))
 }
