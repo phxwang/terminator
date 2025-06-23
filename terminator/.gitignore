@@ -2,6 +2,7 @@
 /log
 /aws-build
 /test-ledger
+/logs
 
 ### Helm ###
 *.tgz
