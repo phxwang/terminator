@@ -683,23 +683,23 @@ async fn crank(klend_client: &KlendClient, obligation_filter: Option<Pubkey>) ->
     let sleep_duration = Duration::from_secs(10);
 
     // 保存所有near liquidatable obligations的数组
-    let mut big_fish_near_liquidatable_obligations_map: std::collections::HashMap<&Pubkey, Vec<(&mut Pubkey, &mut Obligation)>> = HashMap::new();
-    let mut near_liquidatable_obligations_map: std::collections::HashMap<&Pubkey, Vec<(&mut Pubkey, &mut Obligation)>> = HashMap::new();
+    //let mut big_fish_near_liquidatable_obligations_map: std::collections::HashMap<&Pubkey, Vec<(&mut Pubkey, &mut Obligation)>> = HashMap::new();
+    //let mut near_liquidatable_obligations_map: std::collections::HashMap<&Pubkey, Vec<(&mut Pubkey, &mut Obligation)>> = HashMap::new();
 
     // 启动一个新的线程，扫描near_liquidatable_obligations和big_fish_near_liquidatable_obligations
     let near_liquidatable_obligations_thread = tokio::spawn(async move {
         loop {
-            for (market, big_fish_near_liquidatable_obligations) in big_fish_near_liquidatable_obligations_map.iter() {
+            //for (market, big_fish_near_liquidatable_obligations) in big_fish_near_liquidatable_obligations_map.iter() {
 
-                let (rts, reserves, lending_market, clock) = refresh_market(klend_client, market).await?;
+                //let (rts, reserves, lending_market, clock) = refresh_market(klend_client, market).await?;
 
-                for (address, obligation) in big_fish_near_liquidatable_obligations.iter() {
+                //for (address, obligation) in big_fish_near_liquidatable_obligations.iter() {
                     //math::print_obligation_stats(obligation_stats, address, 0, 0);
 
                     //check if the obligation is liquidatable, then send the liquidation tx
-                    check_and_liquidate(klend_client, address, *obligation, &lending_market, &clock, &reserves, &rts).await?;
-                }
-            }
+                    //check_and_liquidate(klend_client, address, *obligation, &lending_market, &clock, &reserves, &rts).await?;
+                //}
+            //}
 
             //for (market, near_liquidatable_obligations) in near_liquidatable_obligations_map.iter() {
             //    let (rts, reserves, lending_market, clock) = refresh_market(klend_client, market).await?;
@@ -728,16 +728,16 @@ async fn crank(klend_client: &KlendClient, obligation_filter: Option<Pubkey>) ->
     };
 
     loop {
-        let mut near_liquidatable_obligations_new_map = HashMap::new();
-        let mut big_fish_near_liquidatable_obligations_new_map = HashMap::new();
+        //let mut near_liquidatable_obligations_new_map = HashMap::new();
+        //let mut big_fish_near_liquidatable_obligations_new_map = HashMap::new();
         for market in &markets {
             info!("{} cranking market", market.to_string().green());
             let st = std::time::Instant::now();
 
             let start = std::time::Instant::now();
 
-            let mut market_near_liquidatable_obligations = vec![];
-            let mut market_big_fish_near_liquidatable_obligations = vec![];
+            //let mut market_near_liquidatable_obligations = vec![];
+            //let mut market_big_fish_near_liquidatable_obligations = vec![];
 
             // Reload accounts
             let obligations = match ob {
@@ -806,17 +806,17 @@ async fn crank(klend_client: &KlendClient, obligation_filter: Option<Pubkey>) ->
                 } else {
                     if near_liquidatable {
                         if is_big_fish {
-                            market_big_fish_near_liquidatable_obligations.push((address, obligation));
+                            //market_big_fish_near_liquidatable_obligations.push((address, obligation));
                         } else {
-                            market_near_liquidatable_obligations.push((address, obligation));
+                            //market_near_liquidatable_obligations.push((address, obligation));
                         }
                     }
                     healthy_obligations += 1;
                 }
             }
 
-            near_liquidatable_obligations_new_map.insert(market, market_near_liquidatable_obligations);
-            big_fish_near_liquidatable_obligations_new_map.insert(market, market_big_fish_near_liquidatable_obligations);
+            //near_liquidatable_obligations_new_map.insert(market, market_near_liquidatable_obligations);
+            //big_fish_near_liquidatable_obligations_new_map.insert(market, market_big_fish_near_liquidatable_obligations);
 
             let en = st.elapsed().as_secs_f64();
             info!(
@@ -824,8 +824,8 @@ async fn crank(klend_client: &KlendClient, obligation_filter: Option<Pubkey>) ->
             );
         }
 
-        near_liquidatable_obligations_map = near_liquidatable_obligations_new_map;
-        big_fish_near_liquidatable_obligations_map = big_fish_near_liquidatable_obligations_new_map;
+        //near_liquidatable_obligations_map = near_liquidatable_obligations_new_map;
+        //big_fish_near_liquidatable_obligations_map = big_fish_near_liquidatable_obligations_new_map;
 
         sleep(sleep_duration).await;
     }
