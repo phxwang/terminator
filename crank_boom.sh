@@ -1,4 +1,4 @@
 #!/bin/bash
 
-cargo run -- crank >> logs/crank.log 2>&1 &
-tail -f crank.log | grep 'Liquidating'
+cargo run -- --log-file logs/crank.log crank 1> /dev/null 2>&1 &
+tail -f logs/crank.log | grep 'Liquidating'

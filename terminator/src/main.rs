@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, sync::{Arc, RwLock}, time::Duration};
+use std::{collections::HashMap, path::PathBuf, sync::{Arc, RwLock}, time::Duration, fs};
 
 use anchor_client::{solana_sdk::pubkey::Pubkey, Cluster};
 use anyhow::Result;
@@ -7,7 +7,7 @@ use colored::Colorize;
 use consts::WRAPPED_SOL_MINT;
 use itertools::Itertools;
 use juno::DecompiledVersionedTx;
-use kamino_lending::{Reserve, Obligation, LendingMarket, ReferrerTokenState};
+use kamino_lending::{Reserve, LendingMarket, ReferrerTokenState};
 use solana_sdk::{
     compute_budget::{self},
     signer::Signer,
@@ -15,7 +15,7 @@ use solana_sdk::{
 };
 use tokio::time::sleep;
 use tracing::{info, warn, debug};
-use tracing_subscriber::filter::EnvFilter;
+use tracing_subscriber::{filter::EnvFilter, layer::SubscriberExt, util::SubscriberInitExt, fmt, Layer};
 
 use crate::{
     accounts::{map_accounts_and_create_infos, oracle_accounts, OracleAccounts},
@@ -80,6 +80,10 @@ pub struct Args {
     /// Print timestamps in logs (not needed on grafana)
     #[clap(long, env, default_value = "true")]
     log_timestamps: bool,
+
+    /// Log file path (optional, if not provided logs only to console)
+    #[clap(long, env)]
+    log_file: Option<PathBuf>,
 
     /// Run with embedded webserver (default false)
     #[clap(short, env, long)]
@@ -177,11 +181,41 @@ async fn main() -> Result<()> {
     };
     let args: Args = Args::parse();
 
-    let env_filter = EnvFilter::from_default_env();
-    let env_filter = env_filter.add_directive("kamino_lending=warn".parse()?);
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
+    let create_env_filter = || {
+        let env_filter = EnvFilter::from_default_env();
+        env_filter.add_directive("kamino_lending=warn".parse().unwrap())
+    };
+
+    // Create console layer
+    let console_layer = fmt::layer()
         .compact()
+        .with_filter(create_env_filter());
+
+    let mut layers = vec![console_layer.boxed()];
+
+    // Add file layer if log_file is specified
+    if let Some(log_file) = &args.log_file {
+        // Create logs directory if it doesn't exist
+        if let Some(parent) = log_file.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file)?;
+
+        let file_layer = fmt::layer()
+            .with_writer(file)
+            .with_ansi(false) // No color codes in files
+            .compact()
+            .with_filter(create_env_filter());
+
+        layers.push(file_layer.boxed());
+    }
+
+    tracing_subscriber::registry()
+        .with(layers)
         .init();
 
     info!("Starting with {:#?}", args);
@@ -472,6 +506,10 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
     let debt_res_key = ob.borrows[0].borrow_reserve;
     let coll_res_key = ob.deposits[0].deposit_reserve;
 
+    info!("Debt reserve key: {}", debt_res_key.to_string().green());
+    info!("Coll reserve key: {}", coll_res_key.to_string().green());
+    info!("Reserves: {:?}", reserves.keys());
+
     // Refresh reserves and obligation
     operations::refresh_reserves_and_obligation(
         klend_client,
@@ -730,12 +768,12 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
     let big_fish_near_liquidatable_obligations_map_clone = Arc::clone(&big_fish_near_liquidatable_obligations_map);
     let near_liquidatable_obligations_map_clone = Arc::clone(&near_liquidatable_obligations_map);
     let klend_client_clone = Arc::clone(klend_client);
-    let big_fish_near_liquidatable_obligations_thread = tokio::spawn(async move {
+    let _big_fish_near_liquidatable_obligations_thread = tokio::spawn(async move {
         let _ = run_liquidation_thread(&klend_client_clone, big_fish_near_liquidatable_obligations_map_clone).await;
     });
 
     let klend_client_clone_2 = Arc::clone(klend_client);
-    let near_liquidatable_obligations_thread = tokio::spawn(async move {
+    let _near_liquidatable_obligations_thread = tokio::spawn(async move {
         let _ = run_liquidation_thread(&klend_client_clone_2, near_liquidatable_obligations_map_clone).await;
     });
 
