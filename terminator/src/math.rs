@@ -136,7 +136,7 @@ pub fn get_liquidatable_amount(
         )
         .min(full_debt_amount_f);
 
-    let liquidation_ratio = liquidatable_debt / full_debt_amount_f;
+    //let liquidation_ratio = liquidatable_debt / full_debt_amount_f;
 
     // This is what is possible, liquidatable/repayable debt in lamports and in $ terms
     let liqidatable_amount: u64 = liquidatable_debt.to_num();

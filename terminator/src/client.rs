@@ -342,6 +342,42 @@ impl KlendClient {
         px::fetch_jup_prices(&mints, usd_mint, amount).await
     }
 
+    pub async fn flash_borrow_reserve_liquidity_ixns(
+        &self,
+        reserve: &StateWithKey<Reserve>,
+        obligation: &Pubkey,
+        liquidity_amount: u64,
+    ) -> Result<Vec<Instruction>> {
+        let flash_borrow_ix = instructions::flash_borrow_reserve_liquidity_ix(
+            &self.program_id,
+            reserve,
+            obligation,
+            liquidity_amount,
+            &self.liquidator,
+        );
+
+        Ok(vec![flash_borrow_ix.instruction])
+    }
+
+    pub async fn flash_repay_reserve_liquidity_ixns(
+        &self,
+        reserve: &StateWithKey<Reserve>,
+        obligation: &Pubkey,
+        liquidity_amount: u64,
+        borrow_instruction_index: u8,
+    ) -> Result<Vec<Instruction>> {
+        let flash_repay_ix = instructions::flash_repay_reserve_liquidity_ix(
+            &self.program_id,
+            reserve,
+            obligation,
+            liquidity_amount,
+            borrow_instruction_index,
+            &self.liquidator,
+        );
+
+        Ok(vec![flash_repay_ix.instruction])
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn liquidate_obligation_and_redeem_reserve_collateral_ixns(
         &self,

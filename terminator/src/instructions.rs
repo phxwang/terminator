@@ -282,6 +282,100 @@ pub fn refresh_obligation_ix(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn flash_borrow_reserve_liquidity_ix(
+    program_id: &Pubkey,
+    reserve: &StateWithKey<Reserve>,
+    _obligation: &Pubkey,
+    liquidity_amount: u64,
+    liquidator: &Liquidator,
+) -> InstructionBlocks {
+    let reserve_state = reserve.state.borrow();
+    let lending_market_pubkey = reserve_state.lending_market;
+    let lending_market_authority =
+        kamino_lending::utils::seeds::pda::lending_market_auth(&lending_market_pubkey);
+
+    let reserve_liquidity_mint = reserve_state.liquidity.mint_pubkey;
+    let user_destination_liquidity = *liquidator.atas.get(&reserve_liquidity_mint).unwrap();
+
+    let instruction = Instruction {
+        program_id: *program_id,
+        accounts: kamino_lending::accounts::FlashBorrowReserveLiquidity {
+            user_transfer_authority: liquidator.wallet.pubkey(),
+            lending_market_authority,
+            lending_market: lending_market_pubkey,
+            reserve: reserve.key,
+            reserve_liquidity_mint,
+            reserve_source_liquidity: reserve_state.liquidity.supply_vault,
+            user_destination_liquidity,
+            reserve_liquidity_fee_receiver: reserve_state.liquidity.fee_vault,
+            referrer_token_state: None,
+            referrer_account: None,
+            sysvar_info: sysvar::instructions::ID,
+            token_program: Token::id(),
+        }
+        .to_account_metas(None),
+        data: kamino_lending::instruction::FlashBorrowReserveLiquidity {
+            liquidity_amount,
+        }
+        .data(),
+    };
+
+    InstructionBlocks {
+        instruction,
+        payer: liquidator.wallet.pubkey(),
+        signers: vec![liquidator.wallet.clone()],
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn flash_repay_reserve_liquidity_ix(
+    program_id: &Pubkey,
+    reserve: &StateWithKey<Reserve>,
+    _obligation: &Pubkey,
+    liquidity_amount: u64,
+    borrow_instruction_index: u8,
+    liquidator: &Liquidator,
+) -> InstructionBlocks {
+    let reserve_state = reserve.state.borrow();
+    let lending_market_pubkey = reserve_state.lending_market;
+    let lending_market_authority =
+        kamino_lending::utils::seeds::pda::lending_market_auth(&lending_market_pubkey);
+
+    let reserve_liquidity_mint = reserve_state.liquidity.mint_pubkey;
+    let user_destination_liquidity = *liquidator.atas.get(&reserve_liquidity_mint).unwrap();
+
+    let instruction = Instruction {
+        program_id: *program_id,
+        accounts: kamino_lending::accounts::FlashRepayReserveLiquidity {
+            user_transfer_authority: liquidator.wallet.pubkey(),
+            lending_market_authority,
+            lending_market: lending_market_pubkey,
+            reserve: reserve.key,
+            reserve_liquidity_mint,
+            user_source_liquidity: user_destination_liquidity,
+            reserve_destination_liquidity: reserve_state.liquidity.supply_vault,
+            reserve_liquidity_fee_receiver: reserve_state.liquidity.fee_vault,
+            referrer_token_state: None,
+            referrer_account: None,
+            sysvar_info: sysvar::instructions::ID,
+            token_program: Token::id(),
+        }
+        .to_account_metas(None),
+        data: kamino_lending::instruction::FlashRepayReserveLiquidity {
+            liquidity_amount,
+            borrow_instruction_index,
+        }
+        .data(),
+    };
+
+    InstructionBlocks {
+        instruction,
+        payer: liquidator.wallet.pubkey(),
+        signers: vec![liquidator.wallet.clone()],
+    }
+}
+
 pub fn maybe_null_pk(pubkey: Pubkey) -> Option<Pubkey> {
     if pubkey == Pubkey::default() || pubkey == NULL_PUBKEY {
         None

@@ -5,11 +5,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use consts::WRAPPED_SOL_MINT;
-use itertools::Itertools;
 use juno::DecompiledVersionedTx;
 use kamino_lending::{Reserve, LendingMarket, ReferrerTokenState};
 use solana_sdk::{
-    compute_budget::{self},
     signer::Signer,
     clock::Clock,
 };
@@ -23,7 +21,6 @@ use crate::{
     config::get_lending_markets,
     jupiter::get_best_swap_instructions,
     liquidator::{Holding, Holdings, Liquidator},
-    math::LiquidationStrategy,
     model::StateWithKey,
     operations::{
         obligation_reserves, referrer_token_states_of_obligation, split_obligations,
@@ -534,7 +531,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
     // Now it's all fully refreshed and up to date
     let debt_reserve_state = *reserves.get(&debt_res_key).unwrap();
     let coll_reserve_state = *reserves.get(&coll_res_key).unwrap();
-    let debt_mint = debt_reserve_state.liquidity.mint_pubkey;
+    let _debt_mint = debt_reserve_state.liquidity.mint_pubkey;
     let debt_reserve = StateWithKey::new(debt_reserve_state, debt_res_key);
     let coll_reserve = StateWithKey::new(coll_reserve_state, coll_res_key);
     let lending_market = StateWithKey::new(*market, ob.lending_market);
@@ -579,7 +576,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
         }
         None => (0, 0),
     };*/
-    let swap_amount = 0;
+    let _swap_amount = 0;
     let liquidate_amount = math::get_liquidatable_amount(
         &obligation,
         &lending_market,
@@ -606,11 +603,11 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
     println!("Simulating the liquidation {:#?}", res);
 
     if res.is_ok() {
-        let user = klend_client.liquidator.wallet.pubkey();
-        let base_mint = &rebalance_config.base_token;
+        let _user = klend_client.liquidator.wallet.pubkey();
+        let _base_mint = &rebalance_config.base_token;
 
         let mut ixns = vec![];
-        let mut luts = vec![];
+        let luts = vec![];
 
         /*if swap_amount > 0 {
             let jupiter_swap = get_best_swap_instructions(
@@ -648,14 +645,24 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
             }
         }*/
 
-        //TODO: add flashloan ixns
+        // TODO: add flashloan ixns
+
+        let flash_borrow_ixns = klend_client
+            .flash_borrow_reserve_liquidity_ixns(
+                &debt_reserve,
+                &obligation.key,
+                liquidate_amount,
+            )
+            .await?;
+
+        ixns.extend_from_slice(&flash_borrow_ixns);
 
         let liquidate_ixns = klend_client
             .liquidate_obligation_and_redeem_reserve_collateral_ixns(
                 lending_market,
-                debt_reserve,
+                debt_reserve.clone(),
                 coll_reserve,
-                obligation,
+                obligation.clone(),
                 liquidate_amount,
                 min_acceptable_received_collateral_amount,
                 max_allowed_ltv_override_pct_opt,
@@ -664,8 +671,20 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
             .unwrap();
         ixns.extend_from_slice(&liquidate_ixns);
 
+        //TODO: add jupiter swap ixns
 
-        //TODO: add flashloan repay ixns
+
+        // TODO: add flashloan repay ixns
+        let flash_repay_ixns = klend_client
+            .flash_repay_reserve_liquidity_ixns(
+                &debt_reserve,
+                &obligation.key,
+                liquidate_amount,
+                0,
+            )
+            .await?;
+
+        ixns.extend_from_slice(&flash_repay_ixns);
 
         // TODO: add compute budget + prio fees
         let mut txn = klend_client.client.tx_builder().add_ixs(ixns.clone());
