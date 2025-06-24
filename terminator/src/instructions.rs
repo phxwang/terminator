@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anchor_client::solana_sdk::{instruction::Instruction, pubkey::Pubkey, signature::Keypair};
 use anchor_lang::{prelude::Rent, system_program::System, Id, InstructionData, ToAccountMetas};
 use anchor_spl::token::Token;
+use tracing::debug;
 use kamino_lending::{LendingMarket, Reserve, ReserveFarmKind};
 use solana_sdk::{
     signer::Signer,
@@ -45,6 +46,10 @@ pub fn liquidate_obligation_and_redeem_reserve_collateral_ix(
     let collateral_ctoken = coll_reserve_state.collateral.mint_pubkey;
     let collateral_token = coll_reserve_state.liquidity.mint_pubkey;
     let debt_token = debt_reserve_state.liquidity.mint_pubkey;
+
+    debug!("collateral_ctoken: {:?}", collateral_ctoken);
+    debug!("collateral_token: {:?}", collateral_token);
+    debug!("debt_token: {:?}", debt_token);
 
     let instruction = Instruction {
         program_id: *program_id,

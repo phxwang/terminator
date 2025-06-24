@@ -92,6 +92,58 @@ pub fn print_obligation_stats(
     (is_liquidatable, near_liquidatable, is_big_fish)
 }
 
+pub fn get_liquidatable_amount(
+    obligation: &StateWithKey<Obligation>,
+    lending_market: &StateWithKey<kamino_lending::LendingMarket>,
+    coll_reserve: &StateWithKey<kamino_lending::Reserve>,
+    debt_reserve: &StateWithKey<kamino_lending::Reserve>,
+    clock: &anchor_lang::prelude::Clock,
+    max_allowed_ltv_override_pct_opt: Option<u64>,
+    liquidation_swap_slippage_pct: f64,
+) -> Result<u64> {
+    let debt_res_key = debt_reserve.key;
+
+    // Calculate what is possible first
+    let LiquidationParams { user_ltv, .. } =
+        kamino_lending::liquidation_operations::get_liquidation_params(
+            &lending_market.state.borrow(),
+            &coll_reserve.state.borrow(),
+            &debt_reserve.state.borrow(),
+            &obligation.state.borrow(),
+            clock.slot,
+            true, // todo actually check if this is true
+            true, // todo actually check if this is true
+            max_allowed_ltv_override_pct_opt,
+        )?;
+
+    let obligation_state = obligation.state.borrow();
+    let lending_market = lending_market.state.borrow();
+    let (debt_liquidity, _) = obligation_state
+        .find_liquidity_in_borrows(debt_res_key)
+        .unwrap();
+
+    let full_debt_amount_f = Fraction::from_bits(debt_liquidity.borrowed_amount_sf);
+    let full_debt_mv_f = Fraction::from_bits(debt_liquidity.market_value_sf);
+
+    let liquidatable_debt =
+        kamino_lending::liquidation_operations::max_liquidatable_borrowed_amount(
+            &obligation_state,
+            lending_market.liquidation_max_debt_close_factor_pct,
+            lending_market.max_liquidatable_debt_market_value_at_once,
+            debt_liquidity,
+            user_ltv,
+            lending_market.insolvency_risk_unhealthy_ltv_pct,
+        )
+        .min(full_debt_amount_f);
+
+    let liquidation_ratio = liquidatable_debt / full_debt_amount_f;
+
+    // This is what is possible, liquidatable/repayable debt in lamports and in $ terms
+    let liqidatable_amount: u64 = liquidatable_debt.to_num();
+
+    Ok(liqidatable_amount)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn decide_liquidation_strategy(
     base_mint: &Pubkey,

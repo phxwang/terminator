@@ -23,6 +23,7 @@ tmp
 helm/charts
 liquidator.json
 target/
+logs/
 
 /config/routing_config.json
 rust_liquidator.json

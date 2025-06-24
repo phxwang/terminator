@@ -12,7 +12,7 @@ use spl_associated_token_account::{
 use spl_token::state::Account as TokenAccount;
 use tracing::{debug, info, warn};
 
-use crate::{accounts::find_account, client::KlendClient, consts::WRAPPED_SOL_MINT, px::Prices};
+use crate::{accounts::find_account, client::KlendClient, consts::WRAPPED_SOL_MINT, px::Prices, config::get_lending_markets};
 
 #[derive(Debug, Clone, Default)]
 pub struct Holdings {
@@ -64,10 +64,19 @@ fn label_of(mint: &Pubkey, reserves: &HashMap<Pubkey, Reserve>) -> String {
 
 impl Liquidator {
     pub async fn init(
-        client: &KlendClient,
-        reserves: &HashMap<Pubkey, Reserve>,
+        client: &KlendClient
     ) -> Result<Liquidator> {
         // Load reserves mints
+
+        let mut reserves = HashMap::new();
+
+        let lending_markets = get_lending_markets(&client.program_id).await?;
+
+        for market in lending_markets {
+            let market_accs = client.fetch_market_and_reserves(&market).await?;
+            reserves.extend(market_accs.reserves);
+        }
+
         let mints: Vec<Pubkey> = reserves
             .iter()
             .flat_map(|(_, r)| [r.liquidity.mint_pubkey, r.collateral.mint_pubkey])
@@ -84,8 +93,10 @@ impl Liquidator {
                     .map(|mint| get_or_create_ata(client, &wallet, mint));
                 let get_or_create_atas =
                     futures::future::join_all(get_or_create_atas_futures).await;
-                for (i, ata) in get_or_create_atas.into_iter().enumerate() {
-                    atas.insert(*mints.get(i).unwrap(), ata?);
+                for (i, ata_option) in get_or_create_atas.into_iter().enumerate() {
+                    if let Some(ata) = ata_option? {
+                        atas.insert(*mints.get(i).unwrap(), ata);
+                    }
                 }
                 info!(
                     "Loaded liquidator {} with {} tokens",
@@ -180,14 +191,14 @@ async fn get_or_create_ata(
     client: &KlendClient,
     owner: &Arc<Keypair>,
     mint: &Pubkey,
-) -> Result<Pubkey> {
+) -> Result<Option<Pubkey>> {
     let owner_pubkey = &owner.pubkey();
     let ata = get_associated_token_address(owner_pubkey, mint);
     if !matches!(find_account(&client.client.client, ata).await, Ok(None)) {
         debug!("Liquidator ATA for mint {} exists: {}", mint, ata);
-        Ok(ata)
+        Ok(Some(ata))
     } else {
-        debug!(
+        info!(
             "Liquidator ATA for mint {} does not exist, creating...",
             mint
         );
@@ -200,17 +211,22 @@ async fn get_or_create_ata(
             .await
             .unwrap();
 
-        let (sig, _) = client.send_and_confirm_transaction(tx).await.unwrap();
-
-        debug!(
-            "Created ata for liquidator: {}, mint: {}, ata: {}, sig: {:?}",
-            owner.pubkey(),
-            mint,
-            ata,
-            sig
-        );
-
-        Ok(ata)
+        match client.send_and_confirm_transaction(tx).await {
+            Ok((sig, _)) => {
+                info!(
+                    "Created ata for liquidator: {}, mint: {}, ata: {}, sig: {:?}",
+                    owner.pubkey(),
+                    mint,
+                    ata,
+                    sig
+                );
+                Ok(Some(ata))
+            }
+            Err(e) => {
+                warn!("Error creating ata for liquidator: {}, mint: {}, ata: {}, error: {:?}", owner.pubkey(), mint, ata, e);
+                Ok(None)
+            }
+        }
     }
 }
 

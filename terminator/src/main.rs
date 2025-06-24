@@ -14,7 +14,7 @@ use solana_sdk::{
     clock::Clock,
 };
 use tokio::time::sleep;
-use tracing::{info, warn, debug};
+use tracing::{info, warn, debug, error};
 use tracing_subscriber::{filter::EnvFilter, layer::SubscriberExt, util::SubscriberInitExt, fmt, Layer};
 
 use crate::{
@@ -22,7 +22,7 @@ use crate::{
     client::{KlendClient, RebalanceConfig},
     config::get_lending_markets,
     jupiter::get_best_swap_instructions,
-    liquidator::{Holding, Holdings},
+    liquidator::{Holding, Holdings, Liquidator},
     math::LiquidationStrategy,
     model::StateWithKey,
     operations::{
@@ -221,7 +221,13 @@ async fn main() -> Result<()> {
     info!("Starting with {:#?}", args);
 
     info!("Initializing client..");
-    let klend_client = config::get_client_for_action(&args)?;
+    let mut klend_client = config::get_client_for_action(&args)?;
+
+    if klend_client.liquidator.atas.is_empty() {
+        info!("Liquidator ATAs are empty, loading...");
+        klend_client.liquidator = Liquidator::init(&klend_client).await?;
+    }
+
     let klend_client = Arc::new(klend_client);
 
     it_event!("klend_terminator::started");
@@ -485,6 +491,7 @@ pub mod swap {
 
 async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Result<()> {
     info!("Liquidating obligation {}", obligation.to_string().green());
+    debug!("Liquidator ATAs: {:?}", klend_client.liquidator.atas);
     let rebalance_config = match &klend_client.rebalance_config {
         None => Err(anyhow::anyhow!("Rebalance settings not found")),
         Some(c) => Ok(c),
@@ -508,7 +515,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
 
     info!("Debt reserve key: {}", debt_res_key.to_string().green());
     info!("Coll reserve key: {}", coll_res_key.to_string().green());
-    info!("Reserves: {:?}", reserves.keys());
+    debug!("Reserves: {:?}", reserves.keys());
 
     // Refresh reserves and obligation
     operations::refresh_reserves_and_obligation(
@@ -532,11 +539,11 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
     let coll_reserve = StateWithKey::new(coll_reserve_state, coll_res_key);
     let lending_market = StateWithKey::new(*market, ob.lending_market);
     let obligation = StateWithKey::new(ob, *obligation);
-    let pxs = fetch_jup_prices(&[debt_mint], &rebalance_config.usdc_mint, 100.0).await?;
-    let holdings = klend_client
-        .liquidator
-        .fetch_holdings(&klend_client.client.client, &reserves, &pxs)
-        .await?;
+    //let pxs = fetch_jup_prices(&[debt_mint], &rebalance_config.usdc_mint, 100.0).await?;
+    //let holdings = klend_client
+    //    .liquidator
+    //    .fetch_holdings(&klend_client.client.client, &reserves, &pxs)
+    //    .await?;
 
     let deposit_reserves: Vec<StateWithKey<Reserve>> = ob
         .deposits
@@ -553,8 +560,27 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
     let max_allowed_ltv_override_pct_opt = Some(10);
     let liquidation_swap_slippage_pct = 0.5;
     let min_acceptable_received_collateral_amount = 1;
-    let liquidation_strategy = math::decide_liquidation_strategy(
-        &rebalance_config.base_token,
+    //let liquidation_strategy = math::decide_liquidation_strategy(
+    //    &rebalance_config.base_token,
+    //    &obligation,
+    //    &lending_market,
+    //    &coll_reserve,
+    //    &debt_reserve,
+    //    &clock,
+    //    max_allowed_ltv_override_pct_opt,
+    //    liquidation_swap_slippage_pct,
+    //    holdings,
+    //)?;
+
+    /*let (swap_amount, liquidate_amount) = match liquidation_strategy {
+        Some(LiquidationStrategy::LiquidateAndRedeem(liquidate_amount)) => (0, liquidate_amount),
+        Some(LiquidationStrategy::SwapThenLiquidate(swap_amount, liquidate_amount)) => {
+            (swap_amount, liquidate_amount)
+        }
+        None => (0, 0),
+    };*/
+    let swap_amount = 0;
+    let liquidate_amount = math::get_liquidatable_amount(
         &obligation,
         &lending_market,
         &coll_reserve,
@@ -562,16 +588,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
         &clock,
         max_allowed_ltv_override_pct_opt,
         liquidation_swap_slippage_pct,
-        holdings,
     )?;
-
-    let (swap_amount, liquidate_amount) = match liquidation_strategy {
-        Some(LiquidationStrategy::LiquidateAndRedeem(liquidate_amount)) => (0, liquidate_amount),
-        Some(LiquidationStrategy::SwapThenLiquidate(swap_amount, liquidate_amount)) => {
-            (swap_amount, liquidate_amount)
-        }
-        None => (0, 0),
-    };
 
     // Simulate liquidation
     let res = kamino_lending::lending_market::lending_operations::liquidate_and_redeem(
@@ -595,7 +612,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
         let mut ixns = vec![];
         let mut luts = vec![];
 
-        if swap_amount > 0 {
+        /*if swap_amount > 0 {
             let jupiter_swap = get_best_swap_instructions(
                 base_mint,
                 &debt_mint,
@@ -629,7 +646,9 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
                     luts.push(table);
                 }
             }
-        }
+        }*/
+
+        //TODO: add flashloan ixns
 
         let liquidate_ixns = klend_client
             .liquidate_obligation_and_redeem_reserve_collateral_ixns(
@@ -644,6 +663,9 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
             .await
             .unwrap();
         ixns.extend_from_slice(&liquidate_ixns);
+
+
+        //TODO: add flashloan repay ixns
 
         // TODO: add compute budget + prio fees
         let mut txn = klend_client.client.tx_builder().add_ixs(ixns.clone());
@@ -723,37 +745,45 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
     Ok(())
 }
 
+async fn liquidation_in_loop(klend_client: &Arc<KlendClient>, liquidatable_obligations_map: Arc<RwLock<HashMap<Pubkey, Vec<Pubkey>>>>) -> Result<()> {
+    let start = std::time::Instant::now();
+    let mut map_read_copy: HashMap<Pubkey, Vec<Pubkey>> = HashMap::new();
+    {
+        let map_read = liquidatable_obligations_map.read().unwrap();
+        for (market, liquidatable_obligations) in map_read.iter() {
+            map_read_copy.insert(*market, liquidatable_obligations.to_vec());
+        }
+    }
+
+    if map_read_copy.is_empty() {
+        info!("[Liquidation Thread] No liquidatable obligations found");
+        sleep(Duration::from_secs(5)).await;
+        return Ok(());
+    }
+
+    let mut total_liquidatable_obligations = 0;
+
+    for (market, liquidatable_obligations) in map_read_copy.iter() {
+        info!("[Liquidation Thread]{}: {} liquidatable obligations found", market.to_string().green(), liquidatable_obligations.len());
+        total_liquidatable_obligations += liquidatable_obligations.len();
+        let (rts, reserves, lending_market, clock) = refresh_market(klend_client, market).await?;
+        for address in liquidatable_obligations.iter() {
+            check_and_liquidate(klend_client, address, &lending_market, &clock, &reserves, &rts).await?;
+        }
+    }
+    let en = start.elapsed().as_secs_f64();
+    info!("[Liquidation Thread] Scanned {} obligations in {}s", total_liquidatable_obligations, en);
+
+    Ok(())
+}
+
 async fn run_liquidation_thread(klend_client: &Arc<KlendClient>,
     liquidatable_obligations_map: Arc<RwLock<HashMap<Pubkey, Vec<Pubkey>>>>) -> Result<()> {
 
     loop {
-        let start = std::time::Instant::now();
-        let mut map_read_copy: HashMap<Pubkey, Vec<Pubkey>> = HashMap::new();
-        {
-            let map_read = liquidatable_obligations_map.read().unwrap();
-            for (market, liquidatable_obligations) in map_read.iter() {
-                map_read_copy.insert(*market, liquidatable_obligations.to_vec());
-            }
+        if let Err(e) = liquidation_in_loop(klend_client, Arc::clone(&liquidatable_obligations_map)).await {
+            error!("[Liquidation Thread] Error: {}", e);
         }
-
-        if map_read_copy.is_empty() {
-            info!("[Liquidation Thread] No liquidatable obligations found");
-            sleep(Duration::from_secs(5)).await;
-            continue;
-        }
-
-        let mut total_liquidatable_obligations = 0;
-
-        for (market, liquidatable_obligations) in map_read_copy.iter() {
-            info!("[Liquidation Thread]{}: {} liquidatable obligations found", market.to_string().green(), liquidatable_obligations.len());
-            total_liquidatable_obligations += liquidatable_obligations.len();
-            let (rts, reserves, lending_market, clock) = refresh_market(klend_client, market).await?;
-            for address in liquidatable_obligations.iter() {
-                check_and_liquidate(klend_client, address, &lending_market, &clock, &reserves, &rts).await?;
-            }
-        }
-        let en = start.elapsed().as_secs_f64();
-        info!("[Liquidation Thread] Scanned {} obligations in {}s", total_liquidatable_obligations, en);
     }
 }
 
