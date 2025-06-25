@@ -118,7 +118,8 @@ pub fn get_rebalance_config_for_action(action: &Actions) -> Option<RebalanceConf
         Actions::Liquidate { rebalance_args, .. }
         | Actions::Crank { rebalance_args, .. }
         | Actions::Rebalance { rebalance_args, .. }
-        | Actions::Swap { rebalance_args, .. } => Some(parse_rebalance_args(rebalance_args)),
+        | Actions::Swap { rebalance_args, .. }
+        | Actions::LoopLiquidate { rebalance_args, .. } => Some(parse_rebalance_args(rebalance_args)),
     }
 }
 

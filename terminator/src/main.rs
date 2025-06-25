@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, sync::{Arc, RwLock}, time::Duration, fs};
+use std::{collections::HashMap, path::PathBuf, sync::{Arc, RwLock}, time::Duration, fs, str::FromStr};
 
 use anchor_client::{solana_sdk::pubkey::Pubkey, Cluster};
 use anyhow::Result;
@@ -31,6 +31,7 @@ use crate::{
     },
     px::fetch_jup_prices,
     utils::get_all_reserve_mints,
+    fs::File,
 };
 
 pub mod accounts;
@@ -170,6 +171,13 @@ pub enum Actions {
         #[clap(flatten)]
         rebalance_args: RebalanceArgs,
     },
+    #[clap()]
+    LoopLiquidate {
+        #[clap(long, env, parse(try_from_str))]
+        scope: String,
+        #[clap(flatten)]
+        rebalance_args: RebalanceArgs,
+    },
 }
 
 #[tokio::main]
@@ -252,6 +260,7 @@ async fn main() -> Result<()> {
             rebalance_args: _,
         } => swap::swap_action(&klend_client, from, to, amount, slippage_pct).await,
         Actions::Rebalance { rebalance_args: _ } => rebalance(&klend_client).await,
+        Actions::LoopLiquidate { scope, rebalance_args: _ } => loop_liquidate(&klend_client, scope).await,
     }
 }
 
@@ -813,17 +822,14 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
     Ok(())
 }
 
-async fn liquidation_in_loop(klend_client: &Arc<KlendClient>, liquidatable_obligations_map: Arc<RwLock<HashMap<Pubkey, Vec<Pubkey>>>>) -> Result<()> {
-    let start = std::time::Instant::now();
-    let mut map_read_copy: HashMap<Pubkey, Vec<Pubkey>> = HashMap::new();
-    {
-        let map_read = liquidatable_obligations_map.read().unwrap();
-        for (market, liquidatable_obligations) in map_read.iter() {
-            map_read_copy.insert(*market, liquidatable_obligations.to_vec());
-        }
-    }
+async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String) -> Result<()> {
+    // load hashmap from scope.json file
+    let file = File::open(format!("{}.json", scope)).unwrap();
+    let obligations_map: HashMap<String, Vec<String>> = serde_json::from_reader(file).unwrap();
 
-    if map_read_copy.is_empty() {
+    let start = std::time::Instant::now();
+
+    if obligations_map.is_empty() {
         info!("[Liquidation Thread] No liquidatable obligations found");
         sleep(Duration::from_secs(5)).await;
         return Ok(());
@@ -831,12 +837,13 @@ async fn liquidation_in_loop(klend_client: &Arc<KlendClient>, liquidatable_oblig
 
     let mut total_liquidatable_obligations = 0;
 
-    for (market, liquidatable_obligations) in map_read_copy.iter() {
-        info!("[Liquidation Thread]{}: {} liquidatable obligations found", market.to_string().green(), liquidatable_obligations.len());
+    for (market, liquidatable_obligations) in obligations_map.iter() {
+        info!("[Liquidation Thread]{}: {} liquidatable obligations found", market.green(), liquidatable_obligations.len());
         total_liquidatable_obligations += liquidatable_obligations.len();
-        let (rts, reserves, lending_market, clock) = refresh_market(klend_client, market).await?;
+        let market_pubkey = Pubkey::from_str(market).unwrap();
+        let (rts, reserves, lending_market, clock) = refresh_market(klend_client, &market_pubkey).await?;
         for address in liquidatable_obligations.iter() {
-            check_and_liquidate(klend_client, address, &lending_market, &clock, &reserves, &rts).await?;
+            check_and_liquidate(klend_client, &Pubkey::from_str(address).unwrap(), &lending_market, &clock, &reserves, &rts).await?;
         }
     }
     let en = start.elapsed().as_secs_f64();
@@ -845,11 +852,10 @@ async fn liquidation_in_loop(klend_client: &Arc<KlendClient>, liquidatable_oblig
     Ok(())
 }
 
-async fn run_liquidation_thread(klend_client: &Arc<KlendClient>,
-    liquidatable_obligations_map: Arc<RwLock<HashMap<Pubkey, Vec<Pubkey>>>>) -> Result<()> {
+async fn loop_liquidate(klend_client: &Arc<KlendClient>, scope: String) -> Result<()> {
 
     loop {
-        if let Err(e) = liquidation_in_loop(klend_client, Arc::clone(&liquidatable_obligations_map)).await {
+        if let Err(e) = liquidate_in_loop(klend_client, scope.clone()).await {
             error!("[Liquidation Thread] Error: {}", e);
         }
     }
@@ -859,21 +865,21 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
     let sleep_duration = Duration::from_secs(10);
 
     // 保存所有near liquidatable obligations的数组
-    let big_fish_near_liquidatable_obligations_map: Arc<RwLock<HashMap<Pubkey, Vec<Pubkey>>>> = Arc::new(RwLock::new(HashMap::new()));
-    let near_liquidatable_obligations_map: Arc<RwLock<HashMap<Pubkey, Vec<Pubkey>>>> = Arc::new(RwLock::new(HashMap::new()));
+    let _big_fish_near_liquidatable_obligations_map: Arc<RwLock<HashMap<Pubkey, Vec<Pubkey>>>> = Arc::new(RwLock::new(HashMap::new()));
+    let _near_liquidatable_obligations_map: Arc<RwLock<HashMap<Pubkey, Vec<Pubkey>>>> = Arc::new(RwLock::new(HashMap::new()));
 
     // 启动一个新的线程，扫描big_fish_near_liquidatable_obligations
-    let big_fish_near_liquidatable_obligations_map_clone = Arc::clone(&big_fish_near_liquidatable_obligations_map);
-    let near_liquidatable_obligations_map_clone = Arc::clone(&near_liquidatable_obligations_map);
-    let klend_client_clone = Arc::clone(klend_client);
-    let _big_fish_near_liquidatable_obligations_thread = tokio::spawn(async move {
-        let _ = run_liquidation_thread(&klend_client_clone, big_fish_near_liquidatable_obligations_map_clone).await;
-    });
+    //let big_fish_near_liquidatable_obligations_map_clone = Arc::clone(&big_fish_near_liquidatable_obligations_map);
+    //let near_liquidatable_obligations_map_clone = Arc::clone(&near_liquidatable_obligations_map);
+    //let klend_client_clone = Arc::clone(klend_client);
+    //let _big_fish_near_liquidatable_obligations_thread = tokio::spawn(async move {
+        //let _ = run_liquidation_thread(&klend_client_clone, big_fish_near_liquidatable_obligations_map_clone).await;
+    //});
 
-    let klend_client_clone_2 = Arc::clone(klend_client);
-    let _near_liquidatable_obligations_thread = tokio::spawn(async move {
-        let _ = run_liquidation_thread(&klend_client_clone_2, near_liquidatable_obligations_map_clone).await;
-    });
+    //let klend_client_clone_2 = Arc::clone(klend_client);
+    //let _near_liquidatable_obligations_thread = tokio::spawn(async move {
+        //let _ = run_liquidation_thread(&klend_client_clone_2, near_liquidatable_obligations_map_clone).await;
+    //});
 
     //sleep(Duration::from_secs(60)).await;
 
@@ -891,8 +897,8 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
     };
 
     loop {
-        let mut near_liquidatable_obligations_new_map: HashMap<Pubkey, Vec<Pubkey>> = HashMap::new();
-        let mut big_fish_near_liquidatable_obligations_new_map: HashMap<Pubkey, Vec<Pubkey>> = HashMap::new();
+        let mut near_liquidatable_obligations_new_map: HashMap<String, Vec<String>> = HashMap::new();
+        let mut big_fish_near_liquidatable_obligations_new_map: HashMap<String, Vec<String>> = HashMap::new();
 
         for market in &markets {
             info!("{} cranking market", market.to_string().green());
@@ -901,8 +907,8 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
             let start = std::time::Instant::now();
 
             //let mut market_near_liquidatable_obligations: Vec<Pubkey> = vec![];
-            let mut market_big_fish_near_liquidatable_obligations: Vec<Pubkey> = vec![];
-            let mut market_near_liquidatable_obligations: Vec<Pubkey> = vec![];
+            let mut market_big_fish_near_liquidatable_obligations: Vec<String> = vec![];
+            let mut market_near_liquidatable_obligations: Vec<String> = vec![];
 
             // Reload accounts
             let obligations = match ob {
@@ -973,10 +979,10 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
                 } else {
                     if near_liquidatable {
                         if is_big_fish {
-                            market_big_fish_near_liquidatable_obligations.push(address.clone());
+                            market_big_fish_near_liquidatable_obligations.push(address.to_string());
                         } else {
                             //market_big_fish_near_liquidatable_obligations.push(address.clone());
-                            market_near_liquidatable_obligations.push(address.clone());
+                            market_near_liquidatable_obligations.push(address.to_string());
                         }
                     }
                     healthy_obligations += 1;
@@ -985,11 +991,11 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
 
             //near_liquidatable_obligations_new_map.insert(*market, market_near_liquidatable_obligations);
             if !market_big_fish_near_liquidatable_obligations.is_empty() {
-                big_fish_near_liquidatable_obligations_new_map.insert(*market, market_big_fish_near_liquidatable_obligations);
+                big_fish_near_liquidatable_obligations_new_map.insert(market.to_string(), market_big_fish_near_liquidatable_obligations);
             }
 
             if !market_near_liquidatable_obligations.is_empty() {
-                near_liquidatable_obligations_new_map.insert(*market, market_near_liquidatable_obligations);
+                near_liquidatable_obligations_new_map.insert(market.to_string(), market_near_liquidatable_obligations);
             }
 
             let en = st.elapsed().as_secs_f64();
@@ -1001,23 +1007,33 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
         //near_liquidatable_obligations_map = near_liquidatable_obligations_new_map;
 
         {
-            let mut map_write = big_fish_near_liquidatable_obligations_map.write().unwrap();
+            //let mut map_write = big_fish_near_liquidatable_obligations_map.write().unwrap();
 
-            map_write.clear();
+            //map_write.clear();
             //map_write.extend(big_fish_near_liquidatable_obligations_new_map);
-            for (market, obligations) in big_fish_near_liquidatable_obligations_new_map.iter() {
-                map_write.insert(*market, obligations.to_vec());
-            }
+            //for (market, obligations) in big_fish_near_liquidatable_obligations_new_map.iter() {
+                //map_write.insert(*market, obligations.to_vec());
+            //}
 
-            info!("refreshed big_fish_near_liquidatable_obligations_map: {:#?}", map_write);
+            info!("writing big_fish_near_liquidatable_obligations_map to file");
+
+            // write big_fish_near_liquidatable_obligations_new_map to file
+            let file = File::create("big_fish_near_liquidatable_obligations.json").unwrap();
+            serde_json::to_writer_pretty(file, &big_fish_near_liquidatable_obligations_new_map).unwrap();
         }
 
         {
-            let mut map_write = near_liquidatable_obligations_map.write().unwrap();
-            map_write.clear();
-            for (market, obligations) in near_liquidatable_obligations_new_map.iter() {
-                map_write.insert(*market, obligations.to_vec());
-            }
+            //let mut map_write = near_liquidatable_obligations_map.write().unwrap();
+            //map_write.clear();
+            //for (market, obligations) in near_liquidatable_obligations_new_map.iter() {
+                //map_write.insert(*market, obligations.to_vec());
+            //}
+
+            info!("writing near_liquidatable_obligations_map to file");
+
+            // write near_liquidatable_obligations_new_map to file
+            let file = File::create("near_liquidatable_obligations.json").unwrap();
+            serde_json::to_writer_pretty(file, &near_liquidatable_obligations_new_map).unwrap();
         }
 
         sleep(sleep_duration).await;
