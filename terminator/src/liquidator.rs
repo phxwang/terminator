@@ -12,7 +12,7 @@ use spl_associated_token_account::{
 use spl_token::state::Account as TokenAccount;
 use tracing::{debug, info, warn};
 
-use crate::{accounts::find_account, client::KlendClient, consts::WRAPPED_SOL_MINT, px::Prices, config::get_lending_markets};
+use crate::{accounts::find_account, client::KlendClient, px::Prices, config::get_lending_markets};
 
 #[derive(Debug, Clone, Default)]
 pub struct Holdings {
@@ -117,7 +117,6 @@ impl Liquidator {
         &self,
         client: &RpcClient,
         reserves: &HashMap<Pubkey, Reserve>,
-        prices: &Prices,
     ) -> Result<Holdings> {
         let mut holdings = Vec::new();
         // TODO: optimize this, get all accounts in batch to have 1 single rpc call

@@ -135,6 +135,12 @@ impl KlendClient {
             .add_lookup_table(self.lookup_table.clone().unwrap());
     }
 
+    pub async fn load_default_lookup_table(&mut self) {
+        self.load_liquidator_lookup_table().await;
+        self.client
+            .add_lookup_table(self.lookup_table.clone().unwrap());
+    }
+
     async fn load_liquidator_lookup_table(&mut self) {
         // The liquidator has one static lookup table associated with it
         // and is stored on a local file

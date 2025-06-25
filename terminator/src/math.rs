@@ -99,7 +99,7 @@ pub fn get_liquidatable_amount(
     debt_reserve: &StateWithKey<kamino_lending::Reserve>,
     clock: &anchor_lang::prelude::Clock,
     max_allowed_ltv_override_pct_opt: Option<u64>,
-    liquidation_swap_slippage_pct: f64,
+    _liquidation_swap_slippage_pct: f64,
 ) -> Result<u64> {
     let debt_res_key = debt_reserve.key;
 

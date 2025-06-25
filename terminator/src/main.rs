@@ -227,6 +227,8 @@ async fn main() -> Result<()> {
         klend_client.liquidator = Liquidator::init(&klend_client).await?;
     }
 
+    klend_client.load_default_lookup_table().await;
+
     let klend_client = Arc::new(klend_client);
 
     it_event!("klend_terminator::started");
@@ -279,7 +281,7 @@ async fn rebalance(klend_client: &Arc<KlendClient>) -> Result<()> {
     info!("Loading holdings..");
     let mut holdings = klend_client
         .liquidator
-        .fetch_holdings(&klend_client.client.client, &all_reserves, &pxs)
+        .fetch_holdings(&klend_client.client.client, &all_reserves)
         .await?;
 
     let base = holdings.holding_of(base_token).unwrap();
@@ -335,7 +337,7 @@ async fn rebalance(klend_client: &Arc<KlendClient>) -> Result<()> {
         tokio::time::sleep(Duration::from_secs(5)).await;
         holdings = klend_client
             .liquidator
-            .fetch_holdings(&klend_client.client.client, &all_reserves, &pxs)
+            .fetch_holdings(&klend_client.client.client, &all_reserves)
             .await?;
     }
 
@@ -352,7 +354,7 @@ async fn rebalance(klend_client: &Arc<KlendClient>) -> Result<()> {
             tokio::time::sleep(Duration::from_secs(5)).await;
             klend_client
                 .liquidator
-                .fetch_holdings(&klend_client.client.client, &all_reserves, &pxs)
+                .fetch_holdings(&klend_client.client.client, &all_reserves)
                 .await?;
         }
     }
@@ -418,7 +420,7 @@ pub mod swap {
         let pxs = fetch_jup_prices(&l_mints, &rebalance_config.usdc_mint, amount as f32).await?;
         let holdings = klend_client
             .liquidator
-            .fetch_holdings(&klend_client.client.client, &reserves, &pxs)
+            .fetch_holdings(&klend_client.client.client, &reserves)
             .await?;
         swap(klend_client, &holdings, &from, &to, amount, slippage_pct).await
     }
@@ -428,20 +430,20 @@ pub mod swap {
         holdings: &Holdings,
         from: &Pubkey,
         to: &Pubkey,
-        amount: f64,
+        amount: u64,
         slippage_pct: f64,
     ) -> Result<(Vec<Instruction>, Option<Vec<AddressLookupTableAccount>>)> {
         let from_token = holdings.holding_of(from)?;
-        let to_token = holdings.holding_of(to)?;
+        let _to_token = holdings.holding_of(to)?;
         let user = klend_client.liquidator.wallet.pubkey();
 
-        let amount_to_swap = (amount * 10f64.powf(from_token.decimals as f64)).floor() as u64;
+        //let amount_to_swap = (amount * 10f64.powf(from_token.decimals as f64)).floor() as u64;
         let slippage_bps = (slippage_pct * 100f64).floor() as u16;
 
         let jupiter_swap = get_best_swap_instructions(
             from,
             to,
-            amount_to_swap,
+            amount,
             true,
             Some(slippage_bps),
             None,
@@ -470,7 +472,7 @@ pub mod swap {
     ) -> Result<()> {
         // https://quote-api.jup.ag/v6/quote?inputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&outputMint=So11111111111111111111111111111111111111112&amount=94576524&slippageBps=50&swapMode=ExactIn&onlyDirectRoutes=true&asLegacyTransaction=false
 
-        let (jup_ixs, lookup_tables) = swap_with_jupiter_ixns(klend_client, holdings, from, to, amount, slippage_pct).await?;
+        /*let (jup_ixs, lookup_tables) = swap_with_jupiter_ixns(klend_client, holdings, from, to, amount, slippage_pct).await?;
 
         let mut builder = klend_client.client.tx_builder().add_ixs(jup_ixs);
 
@@ -487,7 +489,7 @@ pub mod swap {
             .client
             .send_retry_and_confirm_transaction(tx, None, false)
             .await?;
-        info!("Executed transaction: {:?}", sig);
+        info!("Executed transaction: {:?}", sig);*/
 
         Ok(())
     }
@@ -506,6 +508,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
     let market_accs = klend_client
         .fetch_market_and_reserves(&ob.lending_market)
         .await?;
+
     let mut reserves = market_accs.reserves;
     let market = &market_accs.lending_market;
     // todo - don't load all
@@ -519,7 +522,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
 
     info!("Debt reserve key: {}", debt_res_key.to_string().green());
     info!("Coll reserve key: {}", coll_res_key.to_string().green());
-    debug!("Reserves: {:?}", reserves.keys());
+    info!("Reserves for {:?}: {:?}", ob.lending_market, reserves.keys());
 
     // Refresh reserves and obligation
     operations::refresh_reserves_and_obligation(
@@ -543,10 +546,10 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
     let coll_reserve = StateWithKey::new(coll_reserve_state, coll_res_key);
     let lending_market = StateWithKey::new(*market, ob.lending_market);
     let obligation = StateWithKey::new(ob, *obligation);
-    let pxs = fetch_jup_prices(&[debt_mint], &rebalance_config.usdc_mint, 100.0).await?;
+    //let pxs = fetch_jup_prices(&[debt_mint], &rebalance_config.usdc_mint, 100.0).await?;
     let holdings = klend_client
         .liquidator
-        .fetch_holdings(&klend_client.client.client, &reserves, &pxs)
+        .fetch_holdings(&klend_client.client.client, &reserves)
         .await?;
 
     let deposit_reserves: Vec<StateWithKey<Reserve>> = ob
@@ -676,19 +679,20 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
             )
             .await
             .unwrap();
-        ixns.extend_from_slice(&liquidate_ixns);
+        //ixns.extend_from_slice(&liquidate_ixns);
 
         //add jupiter swap ixns
         //TODO: liquidate_amount is not correct, need to calculate the amount of collateral to swap
         let (jup_ixs, lookup_tables) = swap::swap_with_jupiter_ixns(
             klend_client, &holdings,
-            &coll_reserve.state.borrow().liquidity.mint_pubkey,
             &debt_reserve.state.borrow().liquidity.mint_pubkey,
-            liquidate_amount as f64,
+            &coll_reserve.state.borrow().liquidity.mint_pubkey,
+            liquidate_amount,
             liquidation_swap_slippage_pct
         ).await?;
 
         info!("Jupiter swap ixns count: {:?}", jup_ixs.len());
+        //info!("Jupiter swap ixns lookup tables: {:?}", lookup_tables);
 
         ixns.extend_from_slice(&jup_ixs);
         if let Some(tables) = lookup_tables {
