@@ -45,6 +45,7 @@ pub async fn get_best_swap_instructions(
     input_mint: &Pubkey,
     output_mint: &Pubkey,
     amount: u64,
+    output_amount: Option<u64>,
     only_direct_routes: bool,
     slippage_bps: Option<u16>,
     price_impact_limit: Option<f32>,
@@ -87,7 +88,13 @@ pub async fn get_best_swap_instructions(
             Err(_) => None,
         };
 
-        if let Some(best_route) = best_route {
+        if let Some(mut best_route) = best_route {
+            if let Some(output_amount) = output_amount {
+                best_route.out_amount = output_amount;
+                best_route.other_amount_threshold = output_amount;
+                best_route.route_plan[0].swap_info.out_amount = output_amount.to_string();
+            }
+            println!("best_route: {:?}", best_route);
             let instructions_result =
                 get_swap_instructions(best_route, user_public_key, accounts_fetcher).await;
             if let Ok(decompiled_tx) = instructions_result {

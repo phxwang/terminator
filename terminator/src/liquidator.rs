@@ -12,7 +12,7 @@ use spl_associated_token_account::{
 use spl_token::state::Account as TokenAccount;
 use tracing::{debug, info, warn};
 
-use crate::{accounts::find_account, client::KlendClient, px::Prices, config::get_lending_markets};
+use crate::{accounts::find_account, client::KlendClient, config::get_lending_markets};
 
 #[derive(Debug, Clone, Default)]
 pub struct Holdings {

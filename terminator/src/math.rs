@@ -123,7 +123,7 @@ pub fn get_liquidatable_amount(
         .unwrap();
 
     let full_debt_amount_f = Fraction::from_bits(debt_liquidity.borrowed_amount_sf);
-    let full_debt_mv_f = Fraction::from_bits(debt_liquidity.market_value_sf);
+    let _full_debt_mv_f = Fraction::from_bits(debt_liquidity.market_value_sf);
 
     let liquidatable_debt =
         kamino_lending::liquidation_operations::max_liquidatable_borrowed_amount(

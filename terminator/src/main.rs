@@ -10,6 +10,7 @@ use kamino_lending::{Reserve, LendingMarket, ReferrerTokenState};
 use solana_sdk::{
     signer::Signer,
     clock::Clock,
+    compute_budget,
 };
 use tokio::time::sleep;
 use tracing::{info, warn, debug, error};
@@ -417,7 +418,7 @@ pub mod swap {
         let markets =
             client::utils::fetch_markets_and_reserves(klend_client, &lending_markets).await?;
         let (reserves, _, l_mints) = get_all_reserve_mints(&markets);
-        let pxs = fetch_jup_prices(&l_mints, &rebalance_config.usdc_mint, amount as f32).await?;
+        let _pxs = fetch_jup_prices(&l_mints, &rebalance_config.usdc_mint, amount as f32).await?;
         let holdings = klend_client
             .liquidator
             .fetch_holdings(&klend_client.client.client, &reserves)
@@ -430,6 +431,7 @@ pub mod swap {
         from: &Pubkey,
         to: &Pubkey,
         amount: u64,
+        output_amount: Option<u64>,
         slippage_pct: f64,
     ) -> Result<(Vec<Instruction>, Option<Vec<AddressLookupTableAccount>>)> {
         //let from_token = holdings.holding_of(from)?;
@@ -443,6 +445,7 @@ pub mod swap {
             from,
             to,
             amount,
+            output_amount,
             true,
             Some(slippage_bps),
             None,
@@ -462,12 +465,12 @@ pub mod swap {
     }
 
     pub async fn swap(
-        klend_client: &KlendClient,
-        holdings: &Holdings,
-        from: &Pubkey,
-        to: &Pubkey,
-        amount: f64,
-        slippage_pct: f64,
+        _klend_client: &KlendClient,
+        _holdings: &Holdings,
+        _from: &Pubkey,
+        _to: &Pubkey,
+        _amount: f64,
+        _slippage_pct: f64,
     ) -> Result<()> {
         // https://quote-api.jup.ag/v6/quote?inputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&outputMint=So11111111111111111111111111111111111111112&amount=94576524&slippageBps=50&swapMode=ExactIn&onlyDirectRoutes=true&asLegacyTransaction=false
 
@@ -540,7 +543,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
     // Now it's all fully refreshed and up to date
     let debt_reserve_state = *reserves.get(&debt_res_key).unwrap();
     let coll_reserve_state = *reserves.get(&coll_res_key).unwrap();
-    let debt_mint = debt_reserve_state.liquidity.mint_pubkey;
+    let _debt_mint = debt_reserve_state.liquidity.mint_pubkey;
     let debt_reserve = StateWithKey::new(debt_reserve_state, debt_res_key);
     let coll_reserve = StateWithKey::new(coll_reserve_state, coll_res_key);
     let lending_market = StateWithKey::new(*market, ob.lending_market);
@@ -564,7 +567,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
         .collect();
 
     let max_allowed_ltv_override_pct_opt = Some(0);
-    let liquidation_swap_slippage_pct = 0.5;
+    let liquidation_swap_slippage_pct = 0 as f64;
     let min_acceptable_received_collateral_amount = 0;
     //let liquidation_strategy = math::decide_liquidation_strategy(
     //    &rebalance_config.base_token,
@@ -678,6 +681,8 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
             )
             .await?;
 
+        // Record the current instruction count to track flash borrow position
+        let flash_borrow_instruction_index = ixns.len();
         ixns.extend_from_slice(&flash_borrow_ixns);
 
         // add liquidate ixns
@@ -702,25 +707,28 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
             &coll_reserve.state.borrow().liquidity.mint_pubkey,
             &debt_reserve.state.borrow().liquidity.mint_pubkey,
             net_withdraw_liquidity_amount,
+            Some(liquidate_amount),
             liquidation_swap_slippage_pct
         ).await?;
 
         info!("Jupiter swap ixns count: {:?}", jup_ixs.len());
-        //info!("Jupiter swap ixns lookup tables: {:?}", lookup_tables);
+        debug!("Jupiter swap ixns: {:?}", jup_ixs);
+        debug!("Jupiter swap ixns lookup tables: {:?}", lookup_tables);
 
-        ixns.extend_from_slice(&jup_ixs);
+        ixns.extend_from_slice(&jup_ixs.into_iter().filter(|ix| ix.program_id != compute_budget::id()).collect::<Vec<_>>());
         if let Some(tables) = lookup_tables {
             luts.extend_from_slice(&tables);
         }
 
-
         // add flashloan repay ixns
+        // Note: build_with_budget_and_fee() adds 2 ComputeBudget instructions at the beginning
+        // So the actual flash borrow instruction will be at index: flash_borrow_instruction_index + 2
         let flash_repay_ixns = klend_client
             .flash_repay_reserve_liquidity_ixns(
                 &debt_reserve,
                 &obligation.key,
                 liquidate_amount,
-                0,
+                (flash_borrow_instruction_index + 2) as u8,
             )
             .await?;
 
@@ -795,8 +803,8 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
 
     let obligation_stats = math::obligation_info(address, &obligation);
     if obligation_stats.ltv > obligation_stats.unhealthy_ltv {
-        //liquidate(klend_client, obligation).await?;
         info!("[Liquidation Thread] Liquidating obligation: {} {}", address.to_string().green(), obligation.to_string().green());
+        //liquidate(klend_client, address).await?;
     }
     else {
         debug!("[Liquidation Thread] Obligation is not liquidatable: {} {}", address.to_string().green(), obligation.to_string().green());
