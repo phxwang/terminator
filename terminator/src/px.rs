@@ -1,4 +1,5 @@
 use std::{collections::HashMap, str::FromStr};
+use tracing::warn;
 
 use anchor_lang::prelude::Pubkey;
 use anyhow::Result;
@@ -24,10 +25,22 @@ pub async fn fetch_jup_prices(
     output_mint: &Pubkey,
     amount: f32,
 ) -> Result<Prices> {
-    let raw_prices = juno::get_prices(input_mints, output_mint, amount).await?;
-    let mut prices: HashMap<Pubkey, f64> = HashMap::new();
-    for (mint, SwapPrice { price, .. }) in raw_prices {
-        prices.insert(Pubkey::from_str(&mint).unwrap(), price as f64);
+    match juno::get_prices(input_mints, output_mint, amount).await {
+        Ok(raw_prices) => {
+            let mut prices: HashMap<Pubkey, f64> = HashMap::new();
+            for (mint, SwapPrice { price, .. }) in raw_prices {
+                prices.insert(Pubkey::from_str(&mint).unwrap(), price as f64);
+            }
+            let raw_prices = juno::get_prices(input_mints, output_mint, amount).await?;
+            let mut prices: HashMap<Pubkey, f64> = HashMap::new();
+            for (mint, SwapPrice { price, .. }) in raw_prices {
+                prices.insert(Pubkey::from_str(&mint).unwrap(), price as f64);
+            }
+            Ok(Prices { prices })
+        }
+        Err(e) => {
+            warn!("Error fetching prices: {:?}", e);
+            Ok(Prices { prices: HashMap::new() })
+        }
     }
-    Ok(Prices { prices })
 }

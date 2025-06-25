@@ -137,14 +137,7 @@ impl Liquidator {
                         balance: *balance,
                         ui_balance,
                         label: label_of(mint, reserves),
-                        usd_value: if *balance > 0 {
-                            prices
-                                .prices
-                                .get(mint)
-                                .map_or(0.0, |price| ui_balance * price)
-                        } else {
-                            0.0
-                        },
+                        usd_value: 0.0,
                     });
                 }
                 Some(Err(e)) => {
@@ -169,7 +162,7 @@ impl Liquidator {
             balance,
             ui_balance,
             label: "SOL".to_string(),
-            usd_value: ui_balance * prices.prices.get(&WRAPPED_SOL_MINT).unwrap(),
+            usd_value: 0.0,
         };
         info!("Holding {} SOL", sol_holding.ui_balance);
 
