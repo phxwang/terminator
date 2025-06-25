@@ -427,14 +427,13 @@ pub mod swap {
 
     pub async fn swap_with_jupiter_ixns(
         klend_client: &KlendClient,
-        holdings: &Holdings,
         from: &Pubkey,
         to: &Pubkey,
         amount: u64,
         slippage_pct: f64,
     ) -> Result<(Vec<Instruction>, Option<Vec<AddressLookupTableAccount>>)> {
-        let from_token = holdings.holding_of(from)?;
-        let _to_token = holdings.holding_of(to)?;
+        //let from_token = holdings.holding_of(from)?;
+        //let _to_token = holdings.holding_of(to)?;
         let user = klend_client.liquidator.wallet.pubkey();
 
         //let amount_to_swap = (amount * 10f64.powf(from_token.decimals as f64)).floor() as u64;
@@ -522,7 +521,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
 
     info!("Debt reserve key: {}", debt_res_key.to_string().green());
     info!("Coll reserve key: {}", coll_res_key.to_string().green());
-    info!("Reserves for {:?}: {:?}", ob.lending_market, reserves.keys());
+    debug!("Reserves for {:?}: {:?}", ob.lending_market, reserves.keys());
 
     // Refresh reserves and obligation
     operations::refresh_reserves_and_obligation(
@@ -547,10 +546,10 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
     let lending_market = StateWithKey::new(*market, ob.lending_market);
     let obligation = StateWithKey::new(ob, *obligation);
     //let pxs = fetch_jup_prices(&[debt_mint], &rebalance_config.usdc_mint, 100.0).await?;
-    let holdings = klend_client
-        .liquidator
-        .fetch_holdings(&klend_client.client.client, &reserves)
-        .await?;
+    //let holdings = klend_client
+    //    .liquidator
+    //    .fetch_holdings(&klend_client.client.client, &reserves)
+    //    .await?;
 
     let deposit_reserves: Vec<StateWithKey<Reserve>> = ob
         .deposits
@@ -564,9 +563,9 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
         })
         .collect();
 
-    let max_allowed_ltv_override_pct_opt = Some(10);
+    let max_allowed_ltv_override_pct_opt = Some(0);
     let liquidation_swap_slippage_pct = 0.5;
-    let min_acceptable_received_collateral_amount = 1;
+    let min_acceptable_received_collateral_amount = 0;
     //let liquidation_strategy = math::decide_liquidation_strategy(
     //    &rebalance_config.base_token,
     //    &obligation,
@@ -586,7 +585,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
         }
         None => (0, 0),
     };*/
-    let _swap_amount = 0;
+    //let _swap_amount = 0;
     let liquidate_amount = math::get_liquidatable_amount(
         &obligation,
         &lending_market,
@@ -596,6 +595,8 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
         max_allowed_ltv_override_pct_opt,
         liquidation_swap_slippage_pct,
     )?;
+
+    info!("Liquidate amount: {}", liquidate_amount);
 
     // Simulate liquidation
     let res = kamino_lending::lending_market::lending_operations::liquidate_and_redeem(
@@ -613,6 +614,19 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
     println!("Simulating the liquidation {:#?}", res);
 
     if res.is_ok() {
+        let total_withdraw_liquidity_amount = res.unwrap().total_withdraw_liquidity_amount;
+        let mut net_withdraw_liquidity_amount = 0;
+
+        match total_withdraw_liquidity_amount {
+            Some((withdraw_liquidity_amount, protocol_fee)) => {
+                net_withdraw_liquidity_amount = withdraw_liquidity_amount - protocol_fee;
+                info!("Net withdraw liquidity amount: {}", net_withdraw_liquidity_amount);
+            }
+            None => {
+                warn!("Total withdraw liquidity amount is None");
+            }
+        }
+
         let _user = klend_client.liquidator.wallet.pubkey();
         let _base_mint = &rebalance_config.base_token;
 
@@ -679,15 +693,15 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
             )
             .await
             .unwrap();
-        //ixns.extend_from_slice(&liquidate_ixns);
+        ixns.extend_from_slice(&liquidate_ixns);
 
         //add jupiter swap ixns
         //TODO: liquidate_amount is not correct, need to calculate the amount of collateral to swap
         let (jup_ixs, lookup_tables) = swap::swap_with_jupiter_ixns(
-            klend_client, &holdings,
-            &debt_reserve.state.borrow().liquidity.mint_pubkey,
+            klend_client,
             &coll_reserve.state.borrow().liquidity.mint_pubkey,
-            liquidate_amount,
+            &debt_reserve.state.borrow().liquidity.mint_pubkey,
+            net_withdraw_liquidity_amount,
             liquidation_swap_slippage_pct
         ).await?;
 
