@@ -841,11 +841,15 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
 
     let mut total_liquidatable_obligations = 0;
 
+    let mut obligation_reservers_to_refresh: Vec<Pubkey> = vec![];
+
     for (market, liquidatable_obligations) in obligations_map.iter() {
         info!("[Liquidation Thread]{}: {} liquidatable obligations found", market.green(), liquidatable_obligations.len());
         total_liquidatable_obligations += liquidatable_obligations.len();
         let market_pubkey = Pubkey::from_str(market).unwrap();
-        let (rts, reserves, lending_market, clock) = refresh_market(klend_client, &market_pubkey).await?;
+
+        //TODO: only refresh reserves in obligations
+        let (rts, reserves, lending_market, clock) = refresh_market(klend_client, &market_pubkey, &obligation_reservers_to_refresh).await?;
 
         for address_str in liquidatable_obligations.iter() {
             let address = Pubkey::from_str(address_str).unwrap();
@@ -855,6 +859,8 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
             } else {
                 let obligation = klend_client.fetch_obligation(&address).await?;
                 obligation_map.insert(address, obligation);
+                obligation_reservers_to_refresh.extend(obligation.deposits.iter().map(|coll| coll.deposit_reserve));
+                obligation_reservers_to_refresh.extend(obligation.borrows.iter().map(|borrow| borrow.borrow_reserve));
                 check_and_liquidate(klend_client, &address, obligation, &lending_market, &clock, &reserves, &rts).await?;
             }
         }
@@ -938,7 +944,7 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
                 }
                 Some(o) => vec![(obligation_filter.unwrap(), o)],
             };
-            let (rts, reserves, lending_market, clock) = refresh_market(klend_client, market).await?;
+            let (rts, reserves, lending_market, clock) = refresh_market(klend_client, market, &vec![]).await?;
 
             // Refresh all obligations second
             let SplitObligations {
@@ -1055,7 +1061,7 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
     }
 }
 
-async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey)
+async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey, obligation_reservers_to_refresh: &Vec<Pubkey>)
 -> Result<(HashMap<Pubkey, ReferrerTokenState>,
     HashMap<Pubkey, Reserve>,
     LendingMarket,
@@ -1080,6 +1086,10 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey)
     let pyth_account_infos = map_accounts_and_create_infos(&mut pyth_accounts);
     let switchboard_feed_infos = map_accounts_and_create_infos(&mut switchboard_accounts);
     let scope_price_infos = map_accounts_and_create_infos(&mut scope_price_accounts);
+
+    if !obligation_reservers_to_refresh.is_empty() {
+        reserves = reserves.into_iter().filter(|(key, _)| obligation_reservers_to_refresh.contains(key)).collect();
+    }
 
     for (key, reserve) in reserves.iter_mut() {
         info!(
