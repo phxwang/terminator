@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use consts::WRAPPED_SOL_MINT;
 use juno::DecompiledVersionedTx;
-use kamino_lending::{Reserve, LendingMarket, ReferrerTokenState};
+use kamino_lending::{Reserve, LendingMarket, ReferrerTokenState, Obligation};
 use solana_sdk::{
     signer::Signer,
     clock::Clock,
@@ -786,9 +786,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
     Ok(())
 }
 
-async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, lending_market: &LendingMarket, clock: &Clock, reserves: &HashMap<Pubkey, Reserve>, rts: &HashMap<Pubkey, ReferrerTokenState>) -> Result<()> {
-    let mut obligation = klend_client.fetch_obligation(address).await?;
-
+async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, mut obligation: Obligation, lending_market: &LendingMarket, clock: &Clock, reserves: &HashMap<Pubkey, Reserve>, rts: &HashMap<Pubkey, ReferrerTokenState>) -> Result<()> {
     let ObligationReserves {
         deposit_reserves,
         borrow_reserves,
@@ -822,7 +820,7 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
     Ok(())
 }
 
-async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String) -> Result<()> {
+async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, obligation_map: &mut HashMap<Pubkey, Obligation>) -> Result<()> {
     // load hashmap from scope.json file, need to check if the file exists
     let file_path = format!("{}.json", scope);
     if !Path::new(&file_path).exists() {
@@ -848,8 +846,17 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String) -> Re
         total_liquidatable_obligations += liquidatable_obligations.len();
         let market_pubkey = Pubkey::from_str(market).unwrap();
         let (rts, reserves, lending_market, clock) = refresh_market(klend_client, &market_pubkey).await?;
-        for address in liquidatable_obligations.iter() {
-            check_and_liquidate(klend_client, &Pubkey::from_str(address).unwrap(), &lending_market, &clock, &reserves, &rts).await?;
+
+        for address_str in liquidatable_obligations.iter() {
+            let address = Pubkey::from_str(address_str).unwrap();
+
+            if let Some(obligation) = obligation_map.get(&address) {
+                check_and_liquidate(klend_client, &address, *obligation, &lending_market, &clock, &reserves, &rts).await?;
+            } else {
+                let obligation = klend_client.fetch_obligation(&address).await?;
+                obligation_map.insert(address, obligation);
+                check_and_liquidate(klend_client, &address, obligation, &lending_market, &clock, &reserves, &rts).await?;
+            }
         }
     }
     let en = start.elapsed().as_secs_f64();
@@ -860,8 +867,10 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String) -> Re
 
 async fn loop_liquidate(klend_client: &Arc<KlendClient>, scope: String) -> Result<()> {
 
+    let mut obligation_map: HashMap<Pubkey, Obligation> = HashMap::new();
+
     loop {
-        if let Err(e) = liquidate_in_loop(klend_client, scope.clone()).await {
+        if let Err(e) = liquidate_in_loop(klend_client, scope.clone(), &mut obligation_map).await {
             error!("[Liquidation Thread] Error: {}", e);
         }
     }
