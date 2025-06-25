@@ -813,7 +813,7 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
     let obligation_stats = math::obligation_info(address, &obligation);
     if obligation_stats.ltv > obligation_stats.unhealthy_ltv {
         info!("[Liquidation Thread] Liquidating obligation: {} {}", address.to_string().green(), obligation.to_string().green());
-        //liquidate(klend_client, address).await?;
+        liquidate(klend_client, address).await?;
     }
     else {
         debug!("[Liquidation Thread] Obligation is not liquidatable: {} {}", address.to_string().green(), obligation.to_string().green());
