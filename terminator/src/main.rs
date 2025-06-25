@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, sync::{Arc, RwLock}, time::Duration, fs, str::FromStr};
+use std::{collections::HashMap, path::PathBuf, sync::{Arc, RwLock}, time::Duration, fs, str::FromStr, path::Path};
 
 use anchor_client::{solana_sdk::pubkey::Pubkey, Cluster};
 use anyhow::Result;
@@ -823,8 +823,14 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
 }
 
 async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String) -> Result<()> {
-    // load hashmap from scope.json file
-    let file = File::open(format!("{}.json", scope)).unwrap();
+    // load hashmap from scope.json file, need to check if the file exists
+    let file_path = format!("{}.json", scope);
+    if !Path::new(&file_path).exists() {
+        info!("[Liquidation Thread] File {} does not exist", file_path);
+        sleep(Duration::from_secs(5)).await;
+        return Ok(());
+    }
+    let file = File::open(file_path).unwrap();
     let obligations_map: HashMap<String, Vec<String>> = serde_json::from_reader(file).unwrap();
 
     let start = std::time::Instant::now();
