@@ -810,8 +810,12 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
 
     let obligation_stats = math::obligation_info(address, &obligation);
     if obligation_stats.ltv > obligation_stats.unhealthy_ltv {
-        info!("[Liquidation Thread] Liquidating obligation: {} {}", address.to_string().green(), obligation.to_string().green());
+        info!("[Liquidation Thread] Liquidating obligation start: {} {}", address.to_string().green(), obligation.to_string().green());
+
+        let liquidate_start = std::time::Instant::now();
         liquidate(klend_client, address).await?;
+        let liquidate_en = liquidate_start.elapsed().as_secs_f64();
+        info!("[Liquidation Thread] Liquidated obligation finished: {} in {}s", address.to_string().green(), liquidate_en);
     }
     else {
         debug!("[Liquidation Thread] Obligation is not liquidatable: {} {}", address.to_string().green(), obligation.to_string().green());
@@ -821,6 +825,8 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
 }
 
 async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, obligation_map: &mut HashMap<Pubkey, Obligation>) -> Result<()> {
+    let start = std::time::Instant::now();
+
     // load hashmap from scope.json file, need to check if the file exists
     let file_path = format!("{}.json", scope);
     if !Path::new(&file_path).exists() {
@@ -830,8 +836,6 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
     }
     let file = File::open(file_path).unwrap();
     let obligations_map: HashMap<String, Vec<String>> = serde_json::from_reader(file).unwrap();
-
-    let start = std::time::Instant::now();
 
     if obligations_map.is_empty() {
         info!("[Liquidation Thread] No liquidatable obligations found");
