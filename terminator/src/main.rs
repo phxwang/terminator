@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, sync::{Arc, RwLock}, time::Duration, fs, str::FromStr, path::Path};
+use std::{collections::{HashMap, HashSet}, path::PathBuf, sync::{Arc, RwLock}, time::Duration, fs, str::FromStr, path::Path};
 
 use anchor_client::{solana_sdk::pubkey::Pubkey, Cluster};
 use anyhow::Result;
@@ -1092,8 +1092,9 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey, obliga
     let switchboard_feed_infos = map_accounts_and_create_infos(&mut switchboard_accounts);
     let scope_price_infos = map_accounts_and_create_infos(&mut scope_price_accounts);
 
-    if !obligation_reservers_to_refresh.is_empty() {
-        reserves = reserves.into_iter().filter(|(key, _)| obligation_reservers_to_refresh.contains(key)).collect();
+    let refresh_set: HashSet<&Pubkey> = obligation_reservers_to_refresh.iter().collect();
+    if !refresh_set.is_empty() {
+        reserves.retain(|key, _| refresh_set.contains(key));
     }
 
     for (key, reserve) in reserves.iter_mut() {
