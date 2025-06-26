@@ -852,7 +852,7 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
         total_liquidatable_obligations += liquidatable_obligations.len();
         let market_pubkey = Pubkey::from_str(market).unwrap();
 
-        //TODO: only refresh reserves in obligations
+        //only refresh reserves in obligations
         let (rts, reserves, lending_market, clock) = refresh_market(klend_client, &market_pubkey, &obligation_reservers_to_refresh).await?;
 
         for address_str in liquidatable_obligations.iter() {
@@ -1001,6 +1001,7 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
                     unhealthy_obligations += 1;
                     // TODO: liquidate
                     info!("Liquidating obligation: {} {}", address.to_string().green(), obligation.to_string().green());
+                    liquidate(klend_client, address).await?;
                 } else {
                     if near_liquidatable {
                         if is_big_fish {
