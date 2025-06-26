@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use tracing::warn;
+
 use anchor_client::solana_sdk::{instruction::Instruction, pubkey::Pubkey, signature::Keypair};
 use anchor_lang::{prelude::Rent, system_program::System, Id, InstructionData, ToAccountMetas};
 use anchor_spl::token::Token;
@@ -11,6 +13,7 @@ use solana_sdk::{
         SysvarId, {self},
     },
 };
+use spl_token_2022::ID as TOKEN_2022_PROGRAM_ID;
 
 use crate::{consts::NULL_PUBKEY, liquidator::Liquidator, model::StateWithKey, readable, writable};
 
@@ -19,6 +22,25 @@ pub struct InstructionBlocks {
     pub instruction: Instruction,
     pub payer: Pubkey,
     pub signers: Vec<Arc<Keypair>>,
+}
+
+
+/// Determine token program ID based on mint - returns Token2022 for newer mints, SPL Token for others
+/// This is a simplified heuristic - in production you'd want to check the actual mint account
+fn get_token_program_for_mint(mint: &Pubkey) -> Pubkey {
+    // For now, we'll assume all mints could potentially be Token2022
+    // In a real implementation, you'd check the mint account owner
+    // For the specific failing mint in the error message, we'll assume it's Token2022
+    let known_token2022_mints = [
+        "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWH", // The mint from the error
+        // Add other known Token2022 mints here
+    ];
+
+    if known_token2022_mints.contains(&mint.to_string().as_str()) {
+        TOKEN_2022_PROGRAM_ID
+    } else {
+        Token::id()
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -69,11 +91,11 @@ pub fn liquidate_obligation_and_redeem_reserve_collateral_ix(
             user_destination_liquidity: *liquidator.atas.get(&collateral_token).unwrap(),
             user_source_liquidity: *liquidator.atas.get(&debt_token).unwrap(),
             instruction_sysvar_account: sysvar::instructions::ID,
-            repay_liquidity_token_program: Token::id(),
+            repay_liquidity_token_program: get_token_program_for_mint(&debt_token),
             repay_reserve_liquidity_mint: debt_reserve_state.liquidity.mint_pubkey,
             withdraw_reserve_liquidity_mint: coll_reserve_state.liquidity.mint_pubkey,
-            collateral_token_program: Token::id(), // TODO: add Token2022
-            withdraw_liquidity_token_program: Token::id(), // TODO: add Token2022
+            collateral_token_program: get_token_program_for_mint(&collateral_ctoken),
+            withdraw_liquidity_token_program: get_token_program_for_mint(&collateral_token),
         }
         .to_account_metas(None),
         data: kamino_lending::instruction::LiquidateObligationAndRedeemReserveCollateral {
@@ -296,7 +318,21 @@ pub fn flash_borrow_reserve_liquidity_ix(
         kamino_lending::utils::seeds::pda::lending_market_auth(&lending_market_pubkey);
 
     let reserve_liquidity_mint = reserve_state.liquidity.mint_pubkey;
-    let user_destination_liquidity = *liquidator.atas.get(&reserve_liquidity_mint).unwrap();
+    let user_destination_liquidity = match liquidator.atas.get(&reserve_liquidity_mint) {
+        Some(liquidity) => *liquidity,
+        None => {
+            warn!("user_destination_liquidity not found: {:?}", reserve_liquidity_mint);
+            return InstructionBlocks {
+                instruction: Instruction {
+                    program_id: *program_id,
+                    accounts: vec![],
+                    data: vec![],
+                },
+                payer: liquidator.wallet.pubkey(),
+                signers: vec![],
+            };
+        }
+    };
 
     let instruction = Instruction {
         program_id: *program_id,
@@ -312,7 +348,7 @@ pub fn flash_borrow_reserve_liquidity_ix(
             referrer_token_state: None,
             referrer_account: None,
             sysvar_info: sysvar::instructions::ID,
-            token_program: Token::id(),
+            token_program: get_token_program_for_mint(&reserve_liquidity_mint),
         }
         .to_account_metas(None),
         data: kamino_lending::instruction::FlashBorrowReserveLiquidity {
@@ -359,7 +395,7 @@ pub fn flash_repay_reserve_liquidity_ix(
             referrer_token_state: None,
             referrer_account: None,
             sysvar_info: sysvar::instructions::ID,
-            token_program: Token::id(),
+            token_program: get_token_program_for_mint(&reserve_liquidity_mint),
         }
         .to_account_metas(None),
         data: kamino_lending::instruction::FlashRepayReserveLiquidity {

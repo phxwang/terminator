@@ -527,9 +527,13 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
 
     let clock = sysvars::clock(&klend_client.client.client).await;
 
-    // Pick debt and coll reserves to liquidate
-    let debt_res_key = ob.borrows[0].borrow_reserve;
-    let coll_res_key = ob.deposits[0].deposit_reserve;
+    println!("ob: {:?}", ob);
+
+    //find first borrowed_amount > 0
+    let debt_res_key = ob.borrows.iter().find(|b| b.borrowed_amount_sf > 0).unwrap().borrow_reserve;
+
+    //find first deposited_amount > 0
+    let coll_res_key = ob.deposits.iter().find(|d| d.deposited_amount > 0).unwrap().deposit_reserve;
 
     info!("Debt reserve key: {}", debt_res_key.to_string().green());
     info!("Coll reserve key: {}", coll_res_key.to_string().green());
@@ -758,21 +762,22 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
 
         let txn = txn.build_with_budget_and_fee(&[]).await.unwrap();
 
-        let res = klend_client
-            .client
-            .client
-            .simulate_transaction(&txn)
-            .await
-            .unwrap();
-        info!("Simulation result: {:?}", res);
-
         for ix in ixns {
-            println!("Instruction: {:?} {:?}", ix.program_id, ix.data);
+            info!("Instruction: {:?} {:?}", ix.program_id, ix.data);
         }
 
-        let should_send = false;
+        let simulate_only = false;
 
-        if should_send {
+        if simulate_only {
+            let res = klend_client
+                .client
+                .client
+                .simulate_transaction(&txn)
+                .await
+                .unwrap();
+            info!("Simulation result: {:?}", res);
+        }
+        else {
             let sig = klend_client
                 .client
                 .send_retry_and_confirm_transaction(txn, None, false)
@@ -813,9 +818,16 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
         info!("[Liquidation Thread] Liquidating obligation start: {} {}", address.to_string().green(), obligation.to_string().green());
 
         let liquidate_start = std::time::Instant::now();
-        liquidate(klend_client, address).await?;
+        match liquidate(klend_client, address).await {
+            Ok(_) => {
+                info!("[Liquidation Thread] Liquidated obligation finished: {} success", address.to_string().green());
+            }
+            Err(e) => {
+                error!("[Liquidation Thread] Error liquidating obligation: {} {}", address.to_string().green(), e);
+            }
+        }
         let liquidate_en = liquidate_start.elapsed().as_secs_f64();
-        info!("[Liquidation Thread] Liquidated obligation finished: {} in {}s", address.to_string().green(), liquidate_en);
+        info!("[Liquidation Thread] Liquidated obligation time used: {} in {}s", address.to_string().green(), liquidate_en);
     }
     else {
         debug!("[Liquidation Thread] Obligation is not liquidatable: {} {}", address.to_string().green(), obligation.to_string().green());
@@ -853,7 +865,10 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
         let market_pubkey = Pubkey::from_str(market).unwrap();
 
         //only refresh reserves in obligations
+        let refresh_start = std::time::Instant::now();
         let (rts, reserves, lending_market, clock) = refresh_market(klend_client, &market_pubkey, &obligation_reservers_to_refresh).await?;
+        let refresh_en = refresh_start.elapsed().as_secs_f64();
+        info!("[Liquidation Thread] Refreshed market {} in {}s", market_pubkey.to_string().green(), refresh_en);
 
         for address_str in liquidatable_obligations.iter() {
             let address = Pubkey::from_str(address_str).unwrap();
@@ -1000,8 +1015,15 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
                 if is_liquidatable {
                     unhealthy_obligations += 1;
                     // TODO: liquidate
-                    info!("Liquidating obligation: {} {}", address.to_string().green(), obligation.to_string().green());
-                    liquidate(klend_client, address).await?;
+                    info!("Liquidating obligation begin: {} {}", address.to_string().green(), obligation.to_string().green());
+                    match liquidate(klend_client, address).await {
+                        Ok(_) => {
+                            info!("Liquidated obligation success: {} {}", address.to_string().green(), obligation.to_string().green());
+                        }
+                        Err(e) => {
+                            error!("Liquidating obligation error: {} {}", address.to_string().green(), e);
+                        }
+                    }
                 } else {
                     if near_liquidatable {
                         if is_big_fish {

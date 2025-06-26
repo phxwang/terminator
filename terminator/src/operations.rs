@@ -203,31 +203,40 @@ pub async fn refresh_reserves_and_obligation(
     let scope_price_infos = map_accounts_and_create_infos(&mut scope_price_accounts);
 
     // Refresh reserves and obligation
-    {
-        let debt_reserve_state = reserves.get_mut(debt_res_key).unwrap();
-        refresh_reserve(
-            debt_res_key,
-            debt_reserve_state,
-            lending_market,
-            clock,
-            &pyth_account_infos,
-            &switchboard_feed_infos,
-            &scope_price_infos,
-        )?;
-    }
+    match reserves.get_mut(debt_res_key) {
+        Some(debt_reserve_state) => {
+            refresh_reserve(
+                debt_res_key,
+                debt_reserve_state,
+                lending_market,
+                clock,
+                &pyth_account_infos,
+                &switchboard_feed_infos,
+                &scope_price_infos,
+            )?;
+        },
+        None => {
+            warn!("debt_reserve_state not found: {:?}", debt_res_key);
+        }
+    };
 
-    {
-        let coll_reserve_state = reserves.get_mut(coll_res_key).unwrap();
-        refresh_reserve(
-            coll_res_key,
-            coll_reserve_state,
-            lending_market,
-            clock,
-            &pyth_account_infos,
-            &switchboard_feed_infos,
-            &scope_price_infos,
-        )?;
-    }
+
+    match reserves.get_mut(coll_res_key) {
+        Some(coll_reserve_state) => {
+            refresh_reserve(
+                coll_res_key,
+                coll_reserve_state,
+                lending_market,
+                clock,
+                &pyth_account_infos,
+                &switchboard_feed_infos,
+                &scope_price_infos,
+            )?;
+        },
+        None => {
+            warn!("coll_reserve_state not found: {:?}", coll_res_key);
+        }
+    };
 
     let ObligationReserves {
         borrow_reserves,

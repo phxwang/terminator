@@ -7,9 +7,15 @@ use anyhow::{anyhow, Result};
 use kamino_lending::Reserve;
 use solana_sdk::{signature::Keypair, signer::Signer};
 use spl_associated_token_account::{
-    get_associated_token_address, instruction::create_associated_token_account,
+    get_associated_token_address_with_program_id,
+    instruction::create_associated_token_account,
 };
 use spl_token::state::Account as TokenAccount;
+use spl_token_2022::{
+    extension::StateWithExtensions,
+    state::{Account as Token2022Account, Mint as Token2022Mint},
+    ID as TOKEN_2022_PROGRAM_ID,
+};
 use tracing::{debug, info, warn};
 
 use crate::{accounts::find_account, client::KlendClient, config::get_lending_markets};
@@ -60,6 +66,19 @@ fn label_of(mint: &Pubkey, reserves: &HashMap<Pubkey, Reserve>) -> String {
         }
     }
     mint.to_string()
+}
+
+/// Determine if a mint uses Token2022 or SPL Token program
+async fn get_token_program_id(client: &RpcClient, mint: &Pubkey) -> Result<Pubkey> {
+    let mint_account = client.get_account(mint).await?;
+
+    if mint_account.owner == TOKEN_2022_PROGRAM_ID {
+        Ok(TOKEN_2022_PROGRAM_ID)
+    } else if mint_account.owner == Token::id() {
+        Ok(Token::id())
+    } else {
+        Err(anyhow!("Unknown token program for mint {}: {}", mint, mint_account.owner))
+    }
 }
 
 impl Liquidator {
@@ -185,7 +204,20 @@ async fn get_or_create_ata(
     mint: &Pubkey,
 ) -> Result<Option<Pubkey>> {
     let owner_pubkey = &owner.pubkey();
-    let ata = get_associated_token_address(owner_pubkey, mint);
+
+    // Determine the correct token program for this mint
+    let token_program_id = match get_token_program_id(&client.client.client, mint).await {
+        Ok(program_id) => program_id,
+        Err(e) => {
+            warn!("Failed to determine token program for mint {}: {}", mint, e);
+            warn!("Skipping ATA creation for mint {} due to unknown token program", mint);
+            return Ok(None);
+        }
+    };
+
+    // Calculate ATA address using the correct token program
+    let ata =get_associated_token_address_with_program_id(owner_pubkey, mint, &token_program_id);
+
     if !matches!(find_account(&client.client.client, ata).await, Ok(None)) {
         debug!("Liquidator ATA for mint {} exists: {}", mint, ata);
         Ok(Some(ata))
@@ -194,7 +226,9 @@ async fn get_or_create_ata(
             "Liquidator ATA for mint {} does not exist, creating...",
             mint
         );
-        let ix = create_associated_token_account(owner_pubkey, owner_pubkey, mint, &Token::id());
+
+        info!("Creating ATA for mint {} using token program {}", mint, token_program_id);
+        let ix = create_associated_token_account(owner_pubkey, owner_pubkey, mint, &token_program_id);
         let tx = client
             .client
             .tx_builder()
@@ -230,9 +264,20 @@ pub async fn get_token_balance(
 ) -> Result<(u64, u8)> {
     let mint_account = client.get_account(mint).await?;
     let token_account = client.get_account(token_account).await?;
-    let token_account = TokenAccount::unpack(&token_account.data)?;
-    let mint_account = Mint::try_deserialize_unchecked(&mut mint_account.data.as_ref())?;
-    let amount = token_account.amount;
-    let decimals = mint_account.decimals;
-    Ok((amount, decimals))
+
+    // Check if it's a Token2022 mint
+    if mint_account.owner == TOKEN_2022_PROGRAM_ID {
+        let token_account = StateWithExtensions::<Token2022Account>::unpack(&token_account.data)?;
+        let mint_account = StateWithExtensions::<Token2022Mint>::unpack(&mint_account.data)?;
+        let amount = token_account.base.amount;
+        let decimals = mint_account.base.decimals;
+        Ok((amount, decimals))
+    } else {
+        // Standard SPL Token
+        let token_account = TokenAccount::unpack(&token_account.data)?;
+        let mint_account = Mint::try_deserialize_unchecked(&mut mint_account.data.as_ref())?;
+        let amount = token_account.amount;
+        let decimals = mint_account.decimals;
+        Ok((amount, decimals))
+    }
 }

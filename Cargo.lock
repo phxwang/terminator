@@ -2973,6 +2973,7 @@ dependencies = [
  "solana-sdk",
  "spl-associated-token-account 1.1.3",
  "spl-token 3.5.0",
+ "spl-token-2022 1.0.0",
  "spl-token-client",
  "static-pubkey",
  "strum 0.24.0",

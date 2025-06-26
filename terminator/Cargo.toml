@@ -50,6 +50,7 @@ thiserror = "1.0.0"
 farms = { git = "https://github.com/Kamino-Finance/kfarms", default-features = false, features = ["no-entrypoint"] }
 static-pubkey = "1.0.3"
 spl-token = "3.5.0"
+spl-token-2022 = "1.0.0"
 juno = { git = "https://github.com/Kamino-Finance/juno" }
 dotenvy = "0.15.7"
 spl-token-client = "0.7.1"
