@@ -1097,7 +1097,28 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey, obliga
         reserves.retain(|key, _| refresh_set.contains(key));
     }
 
-    for (key, reserve) in reserves.iter_mut() {
+    // 预先过滤出真正需要refresh的reserves的keys
+    let keys_needing_refresh: Vec<_> = reserves
+        .iter()
+        .filter(|(_key, reserve)| {
+            // 检查是否需要refresh
+            let ignore_tokens = ["CHAI"];
+            if ignore_tokens.contains(&reserve.config.token_info.symbol()) {
+                return false;
+            }
+
+            kamino_lending::lending_market::lending_operations::is_price_refresh_needed(
+                reserve,
+                &lending_market,
+                clock.unix_timestamp,
+            )
+        })
+        .map(|(key, _)| *key)
+        .collect();
+
+    // 只对需要refresh的reserves处理
+    for key in keys_needing_refresh {
+        let reserve = reserves.get_mut(&key).unwrap();
         info!(
             "Refreshing reserve {} token {} with status {}",
             key.to_string().green(),
@@ -1107,10 +1128,6 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey, obliga
         // if reserve.config.status != ReserveStatus::Active as u8 {
         //     continue;
         // }
-        let ignore_tokens = ["CHAI"];
-        if ignore_tokens.contains(&reserve.config.token_info.symbol()) {
-            continue;
-        }
         if let Err(e) = reserve.last_update.slots_elapsed(clock.slot) {
             warn!(err = ?e,
                 "RESERVE {:?} last updated slot is already ahead of the clock, skipping refresh",
@@ -1118,7 +1135,7 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey, obliga
             );
         } else {
             operations::refresh_reserve(
-                key,
+                &key,
                 reserve,
                 &lending_market,
                 &clock,
