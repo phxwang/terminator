@@ -84,72 +84,55 @@ pub async fn oracle_accounts<T: AsyncClient, S: Signer>(
     client: &OrbitLink<T, S>,
     reserves: &HashMap<Pubkey, Reserve>,
 ) -> Result<OracleAccounts> {
-    let mut pyth_accounts = HashSet::new();
-    let mut switchboard_feeds = HashSet::new();
-    let mut scope_prices = HashSet::new();
+    let mut all_oracle_keys = HashSet::new();
+    let mut pyth_keys = HashSet::new();
+    let mut switchboard_keys = HashSet::new();
+    let mut scope_keys = HashSet::new();
 
     for (_, reserve) in reserves.iter() {
-        pyth_accounts.insert(reserve.config.token_info.pyth_configuration.price);
-        switchboard_feeds.insert(
-            reserve
-                .config
-                .token_info
-                .switchboard_configuration
-                .price_aggregator,
-        );
-        switchboard_feeds.insert(
-            reserve
-                .config
-                .token_info
-                .switchboard_configuration
-                .twap_aggregator,
-        );
-        scope_prices.insert(reserve.config.token_info.scope_configuration.price_feed);
+        let pyth_key = reserve.config.token_info.pyth_configuration.price;
+        let sb_price_key = reserve.config.token_info.switchboard_configuration.price_aggregator;
+        let sb_twap_key = reserve.config.token_info.switchboard_configuration.twap_aggregator;
+        let scope_key = reserve.config.token_info.scope_configuration.price_feed;
+
+        pyth_keys.insert(pyth_key);
+        switchboard_keys.insert(sb_price_key);
+        switchboard_keys.insert(sb_twap_key);
+        scope_keys.insert(scope_key);
+
+        all_oracle_keys.insert(pyth_key);
+        all_oracle_keys.insert(sb_price_key);
+        all_oracle_keys.insert(sb_twap_key);
+        all_oracle_keys.insert(scope_key);
     }
 
-    let pyth_account_pubkeys: Vec<Pubkey> = pyth_accounts.into_iter().collect();
-    let pyth_accounts = client
-        .client
-        .get_multiple_accounts(pyth_account_pubkeys.as_slice())
-        .await?;
+    let all_keys: Vec<Pubkey> = all_oracle_keys.into_iter().collect();
+    let all_accounts = client.client.get_multiple_accounts(&all_keys).await?;
 
-    let pyth_accounts_mapped = pyth_accounts
-        .into_iter()
-        .zip(pyth_account_pubkeys.into_iter())
-        .filter(|(account, _)| account.is_some())
-        .map(|(account, pubkey)| (pubkey, false, account.unwrap()))
-        .collect::<Vec<_>>();
+    let mut pyth_accounts = Vec::new();
+    let mut switchboard_accounts = Vec::new();
+    let mut scope_price_accounts = Vec::new();
 
-    let switchboard_feed_pubkeys: Vec<Pubkey> = switchboard_feeds.into_iter().collect();
-    let switchboard_feeds = client
-        .client
-        .get_multiple_accounts(switchboard_feed_pubkeys.as_slice())
-        .await?;
+    for (i, key) in all_keys.iter().enumerate() {
+        if let Some(account) = &all_accounts[i] {
+            let account_tuple = (*key, false, account.clone());
 
-    let switchboard_feeds_mapped = switchboard_feeds
-        .into_iter()
-        .zip(switchboard_feed_pubkeys.into_iter())
-        .filter(|(account, _)| account.is_some())
-        .map(|(account, pubkey)| (pubkey, false, account.unwrap()))
-        .collect::<Vec<_>>();
-
-    let scope_price_pubkeys: Vec<Pubkey> = scope_prices.into_iter().collect();
-    let scope_prices = client
-        .client
-        .get_multiple_accounts(scope_price_pubkeys.as_slice())
-        .await?;
-
-    let scope_prices_mapped = scope_prices
-        .into_iter()
-        .zip(scope_price_pubkeys.into_iter())
-        .filter(|(account, _)| account.is_some())
-        .map(|(account, pubkey)| (pubkey, false, account.unwrap()))
-        .collect::<Vec<_>>();
+            if pyth_keys.contains(key) {
+                pyth_accounts.push(account_tuple.clone());
+            }
+            if switchboard_keys.contains(key) {
+                switchboard_accounts.push(account_tuple.clone());
+            }
+            if scope_keys.contains(key) {
+                scope_price_accounts.push(account_tuple.clone());
+            }
+        }
+    }
 
     Ok(OracleAccounts {
-        pyth_accounts: pyth_accounts_mapped,
-        switchboard_accounts: switchboard_feeds_mapped,
-        scope_price_accounts: scope_prices_mapped,
+        pyth_accounts,
+        switchboard_accounts,
+        scope_price_accounts,
     })
 }
 
