@@ -890,7 +890,16 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
         sleep(Duration::from_secs(5)).await;
         return Ok(());
     }
-    let file = File::open(file_path).unwrap();
+
+    let file = match File::open(&file_path) {
+        Ok(file) => file,
+        Err(e) => {
+            error!("[Liquidation Thread] Error opening file {}: {}", file_path, e);
+            sleep(Duration::from_secs(5)).await;
+            return Ok(());
+        }
+    };
+
     let obligations_map: HashMap<String, Vec<String>> = match serde_json::from_reader(file) {
         Ok(obligations_map) => {
             obligations_map
@@ -914,25 +923,55 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
     for (market, liquidatable_obligations) in obligations_map.iter() {
         info!("[Liquidation Thread]{}: {} liquidatable obligations found", market.green(), liquidatable_obligations.len());
         total_liquidatable_obligations += liquidatable_obligations.len();
-        let market_pubkey = Pubkey::from_str(market).unwrap();
+
+        let market_pubkey = match Pubkey::from_str(market) {
+            Ok(pubkey) => pubkey,
+            Err(e) => {
+                error!("[Liquidation Thread] Invalid market pubkey {}: {}", market, e);
+                continue;
+            }
+        };
 
         //only refresh reserves in obligations
         let refresh_start = std::time::Instant::now();
-        let (rts, reserves, lending_market, clock) = refresh_market(klend_client, &market_pubkey, &obligation_reservers_to_refresh).await?;
+        let (rts, reserves, lending_market, clock) = match refresh_market(klend_client, &market_pubkey, &obligation_reservers_to_refresh).await {
+            Ok(result) => result,
+            Err(e) => {
+                error!("[Liquidation Thread] Error refreshing market {}: {}", market_pubkey, e);
+                continue;
+            }
+        };
         let refresh_en = refresh_start.elapsed().as_secs_f64();
         info!("[Liquidation Thread] Refreshed market {} in {}s", market_pubkey.to_string().green(), refresh_en);
 
         for address_str in liquidatable_obligations.iter() {
-            let address = Pubkey::from_str(address_str).unwrap();
+            let address = match Pubkey::from_str(address_str) {
+                Ok(pubkey) => pubkey,
+                Err(e) => {
+                    error!("[Liquidation Thread] Invalid obligation address {}: {}", address_str, e);
+                    continue;
+                }
+            };
 
             if let Some(obligation) = obligation_map.get(&address) {
-                check_and_liquidate(klend_client, &address, *obligation, &lending_market, &clock, &reserves, &rts).await?;
+                if let Err(e) = check_and_liquidate(klend_client, &address, *obligation, &lending_market, &clock, &reserves, &rts).await {
+                    error!("[Liquidation Thread] Error checking/liquidating obligation {}: {}", address, e);
+                }
             } else {
-                let obligation = klend_client.fetch_obligation(&address).await?;
-                obligation_map.insert(address, obligation);
-                obligation_reservers_to_refresh.extend(obligation.deposits.iter().map(|coll| coll.deposit_reserve));
-                obligation_reservers_to_refresh.extend(obligation.borrows.iter().map(|borrow| borrow.borrow_reserve));
-                check_and_liquidate(klend_client, &address, obligation, &lending_market, &clock, &reserves, &rts).await?;
+                match klend_client.fetch_obligation(&address).await {
+                    Ok(obligation) => {
+                        obligation_map.insert(address, obligation);
+                        obligation_reservers_to_refresh.extend(obligation.deposits.iter().map(|coll| coll.deposit_reserve));
+                        obligation_reservers_to_refresh.extend(obligation.borrows.iter().map(|borrow| borrow.borrow_reserve));
+                        if let Err(e) = check_and_liquidate(klend_client, &address, obligation, &lending_market, &clock, &reserves, &rts).await {
+                            error!("[Liquidation Thread] Error checking/liquidating obligation {}: {}", address, e);
+                        }
+                    }
+                    Err(e) => {
+                        error!("[Liquidation Thread] Error fetching obligation {}: {}", address, e);
+                        continue;
+                    }
+                }
             }
         }
     }
