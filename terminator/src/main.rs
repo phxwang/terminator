@@ -251,7 +251,7 @@ async fn main() -> Result<()> {
         Actions::Liquidate {
             obligation,
             rebalance_args: _,
-        } => liquidate(&klend_client, &obligation).await,
+        } => liquidate(&klend_client, &obligation, false).await,
         Actions::Swap {
             from,
             to,
@@ -506,7 +506,7 @@ pub mod swap {
     }
 }
 
-async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Result<()> {
+async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, dont_refresh: bool) -> Result<()> {
     info!("Liquidating obligation {}", obligation.to_string().green());
     debug!("Liquidator ATAs: {:?}", klend_client.liquidator.atas);
     let rebalance_config = match &klend_client.rebalance_config {
@@ -514,18 +514,67 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
         Some(c) => Ok(c),
     }?;
 
-    // Reload accounts
-    let mut ob = klend_client.fetch_obligation(obligation).await?;
-    let market_accs = klend_client
-        .fetch_market_and_reserves(&ob.lending_market)
+    let (ob, reserves, market, _rts, clock) = if dont_refresh {
+        // When dont_refresh is true, we avoid redundant data loading
+        // The data should already be fresh from check_and_liquidate
+        info!("Skipping data refresh as dont_refresh=true");
+
+        // We still need to fetch the obligation to get basic info for liquidation
+        let ob = klend_client.fetch_obligation(obligation).await?;
+        let market_accs = klend_client
+            .fetch_market_and_reserves(&ob.lending_market)
+            .await?;
+
+        (
+            ob,
+            market_accs.reserves,
+            market_accs.lending_market,
+            HashMap::new(), // Empty RTS as we skip refresh
+            sysvars::clock(&klend_client.client.client).await,
+        )
+    } else {
+        // Original refresh logic when dont_refresh is false
+        info!("Performing full data refresh");
+
+        // Reload accounts
+        let mut ob = klend_client.fetch_obligation(obligation).await?;
+        let market_accs = klend_client
+            .fetch_market_and_reserves(&ob.lending_market)
+            .await?;
+
+        let mut reserves = market_accs.reserves;
+        let market = market_accs.lending_market;
+        // todo - don't load all
+        let rts = klend_client.fetch_referrer_token_states().await?;
+
+        let clock = sysvars::clock(&klend_client.client.client).await;
+
+        //find first borrowed_amount > 0
+        let debt_res_key = ob.borrows.iter().find(|b| b.borrowed_amount_sf > 0).unwrap().borrow_reserve;
+
+        //find first deposited_amount > 0
+        let coll_res_key = ob.deposits.iter().find(|d| d.deposited_amount > 0).unwrap().deposit_reserve;
+
+        info!("Debt reserve key: {}", debt_res_key.to_string().green());
+        info!("Coll reserve key: {}", coll_res_key.to_string().green());
+        debug!("Reserves for {:?}: {:?}", ob.lending_market, reserves.keys());
+
+        // Refresh reserves and obligation
+        operations::refresh_reserves_and_obligation(
+            klend_client,
+            &debt_res_key,
+            &coll_res_key,
+            obligation,
+            &mut ob,
+            &mut reserves,
+            &rts,
+            &market,
+            &clock,
+        )
         .await?;
 
-    let mut reserves = market_accs.reserves;
-    let market = &market_accs.lending_market;
-    // todo - don't load all
-    let rts = klend_client.fetch_referrer_token_states().await?;
-
-    let clock = sysvars::clock(&klend_client.client.client).await;
+        (ob, reserves, market, rts, clock)
+    };
 
     println!("ob: {:?}", ob);
 
@@ -539,27 +588,13 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
     info!("Coll reserve key: {}", coll_res_key.to_string().green());
     debug!("Reserves for {:?}: {:?}", ob.lending_market, reserves.keys());
 
-    // Refresh reserves and obligation
-    operations::refresh_reserves_and_obligation(
-        klend_client,
-        &debt_res_key,
-        &coll_res_key,
-        obligation,
-        &mut ob,
-        &mut reserves,
-        &rts,
-        market,
-        &clock,
-    )
-    .await?;
-
     // Now it's all fully refreshed and up to date
     let debt_reserve_state = *reserves.get(&debt_res_key).unwrap();
     let coll_reserve_state = *reserves.get(&coll_res_key).unwrap();
     let _debt_mint = debt_reserve_state.liquidity.mint_pubkey;
     let debt_reserve = StateWithKey::new(debt_reserve_state, debt_res_key);
     let coll_reserve = StateWithKey::new(coll_reserve_state, coll_res_key);
-    let lending_market = StateWithKey::new(*market, ob.lending_market);
+    let lending_market = StateWithKey::new(market, ob.lending_market);
     let obligation = StateWithKey::new(ob, *obligation);
     //let pxs = fetch_jup_prices(&[debt_mint], &rebalance_config.usdc_mint, 100.0).await?;
     //let holdings = klend_client
@@ -714,7 +749,6 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
         ixns.extend_from_slice(&liquidate_ixns);
 
         //add jupiter swap ixns
-        //TODO: liquidate_amount is not correct, need to calculate the amount of collateral to swap
         let (jup_ixs, lookup_tables) = swap::swap_with_jupiter_ixns(
             klend_client,
             &coll_reserve.state.borrow().liquidity.mint_pubkey,
@@ -766,27 +800,37 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey) -> Resu
             info!("Instruction: {:?} {:?}", ix.program_id, ix.data);
         }
 
-        let simulate_only = false;
-
-        if simulate_only {
-            let res = klend_client
+         match klend_client
                 .client
                 .client
                 .simulate_transaction(&txn)
                 .await
-                .unwrap();
-            info!("Simulation result: {:?}", res);
-        }
-        else {
-            let sig = klend_client
-                .client
-                .send_retry_and_confirm_transaction(txn, None, false)
-                .await
-                .unwrap();
+                {
+                    Ok(res) => {
+                        info!("Simulation result: {:?}", res);
 
-            info!("Liquidation tx sent: {:?}", sig.0);
-            info!("Liquidation tx res: {:?}", sig.1);
-        }
+                        let simulate_only = false;
+
+                        if !simulate_only && res.value.err.is_none() {
+                            match klend_client
+                                .client
+                                .send_retry_and_confirm_transaction(txn, None, false)
+                                .await
+                                {
+                                    Ok(sig) => {
+                                        info!("Liquidation tx sent: {:?}", sig.0);
+                                        info!("Liquidation tx res: {:?}", sig.1);
+                                    }
+                                    Err(e) => {
+                                        error!("Liquidation tx error: {:?}", e);
+                                    }
+                                }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Simulation error: {:?}", e);
+                    }
+                }
     }
     Ok(())
 }
@@ -818,7 +862,7 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
         info!("[Liquidation Thread] Liquidating obligation start: {} {}", address.to_string().green(), obligation.to_string().green());
 
         let liquidate_start = std::time::Instant::now();
-        match liquidate(klend_client, address).await {
+        match liquidate(klend_client, address, true).await {
             Ok(_) => {
                 info!("[Liquidation Thread] Liquidated obligation finished: {} success", address.to_string().green());
             }
@@ -847,7 +891,15 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
         return Ok(());
     }
     let file = File::open(file_path).unwrap();
-    let obligations_map: HashMap<String, Vec<String>> = serde_json::from_reader(file).unwrap();
+    let obligations_map: HashMap<String, Vec<String>> = match serde_json::from_reader(file) {
+        Ok(obligations_map) => {
+            obligations_map
+        }
+        Err(e) => {
+            error!("[Liquidation Thread] Error loading obligations map: {}", e);
+            return Err(e.into());
+        }
+    };
 
     if obligations_map.is_empty() {
         info!("[Liquidation Thread] No liquidatable obligations found");
@@ -1016,7 +1068,7 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
                     unhealthy_obligations += 1;
                     // TODO: liquidate
                     info!("Liquidating obligation begin: {} {}", address.to_string().green(), obligation.to_string().green());
-                    match liquidate(klend_client, address).await {
+                    match liquidate(klend_client, address, true).await {
                         Ok(_) => {
                             info!("Liquidated obligation success: {} {}", address.to_string().green(), obligation.to_string().green());
                         }
