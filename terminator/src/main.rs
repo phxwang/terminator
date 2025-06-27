@@ -579,18 +579,42 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, dont_re
     println!("ob: {:?}", ob);
 
     //find first borrowed_amount > 0
-    let debt_res_key = ob.borrows.iter().find(|b| b.borrowed_amount_sf > 0).unwrap().borrow_reserve;
+    let debt_res_key = match ob.borrows.iter().find(|b| b.borrowed_amount_sf > 0) {
+        Some(borrow) => borrow.borrow_reserve,
+        None => {
+            error!("No borrowed amount found for obligation {}", obligation);
+            return Err(anyhow::anyhow!("No borrowed amount found for obligation"));
+        }
+    };
 
     //find first deposited_amount > 0
-    let coll_res_key = ob.deposits.iter().find(|d| d.deposited_amount > 0).unwrap().deposit_reserve;
+    let coll_res_key = match ob.deposits.iter().find(|d| d.deposited_amount > 0) {
+        Some(deposit) => deposit.deposit_reserve,
+        None => {
+            error!("No deposited amount found for obligation {}", obligation);
+            return Err(anyhow::anyhow!("No deposited amount found for obligation"));
+        }
+    };
 
     info!("Debt reserve key: {}", debt_res_key.to_string().green());
     info!("Coll reserve key: {}", coll_res_key.to_string().green());
     debug!("Reserves for {:?}: {:?}", ob.lending_market, reserves.keys());
 
     // Now it's all fully refreshed and up to date
-    let debt_reserve_state = *reserves.get(&debt_res_key).unwrap();
-    let coll_reserve_state = *reserves.get(&coll_res_key).unwrap();
+    let debt_reserve_state = match reserves.get(&debt_res_key) {
+        Some(reserve) => *reserve,
+        None => {
+            error!("Debt reserve {} not found in reserves", debt_res_key);
+            return Err(anyhow::anyhow!("Debt reserve not found in reserves"));
+        }
+    };
+    let coll_reserve_state = match reserves.get(&coll_res_key) {
+        Some(reserve) => *reserve,
+        None => {
+            error!("Collateral reserve {} not found in reserves", coll_res_key);
+            return Err(anyhow::anyhow!("Collateral reserve not found in reserves"));
+        }
+    };
     let _debt_mint = debt_reserve_state.liquidity.mint_pubkey;
     let debt_reserve = StateWithKey::new(debt_reserve_state, debt_res_key);
     let coll_reserve = StateWithKey::new(coll_reserve_state, coll_res_key);
@@ -606,11 +630,14 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, dont_re
         .deposits
         .iter()
         .filter(|coll| coll.deposit_reserve != Pubkey::default())
-        .map(|coll| {
-            StateWithKey::new(
-                *reserves.get(&coll.deposit_reserve).unwrap(),
-                coll.deposit_reserve,
-            )
+        .filter_map(|coll| {
+            match reserves.get(&coll.deposit_reserve) {
+                Some(reserve) => Some(StateWithKey::new(*reserve, coll.deposit_reserve)),
+                None => {
+                    error!("Deposit reserve {} not found in reserves", coll.deposit_reserve);
+                    None
+                }
+            }
         })
         .collect();
 
@@ -665,7 +692,14 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, dont_re
     println!("Simulating the liquidation {:#?}", res);
 
     if res.is_ok() {
-        let total_withdraw_liquidity_amount = res.unwrap().total_withdraw_liquidity_amount;
+        let total_withdraw_liquidity_amount = match res {
+            Ok(result) => result.total_withdraw_liquidity_amount,
+            Err(_) => {
+                // This should not happen since we checked is_ok() above
+                error!("Unexpected error in liquidation simulation result");
+                return Ok(());
+            }
+        };
         let mut net_withdraw_liquidity_amount = 0;
 
         match total_withdraw_liquidity_amount {
@@ -734,7 +768,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, dont_re
         ixns.extend_from_slice(&flash_borrow_ixns);
 
         // add liquidate ixns
-        let liquidate_ixns = klend_client
+        let liquidate_ixns = match klend_client
             .liquidate_obligation_and_redeem_reserve_collateral_ixns(
                 lending_market,
                 debt_reserve.clone(),
@@ -744,8 +778,13 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, dont_re
                 min_acceptable_received_collateral_amount,
                 max_allowed_ltv_override_pct_opt,
             )
-            .await
-            .unwrap();
+            .await {
+                Ok(ixns) => ixns,
+                Err(e) => {
+                    error!("Error creating liquidate instructions: {}", e);
+                    return Err(e);
+                }
+            };
         ixns.extend_from_slice(&liquidate_ixns);
 
         //add jupiter swap ixns
@@ -794,7 +833,13 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, dont_re
             urlencoding::encode(&txn_b64)
         );
 
-        let txn = txn.build_with_budget_and_fee(&[]).await.unwrap();
+        let txn = match txn.build_with_budget_and_fee(&[]).await {
+            Ok(txn) => txn,
+            Err(e) => {
+                error!("Error building transaction: {}", e);
+                return Err(e.into());
+            }
+        };
 
         for ix in ixns {
             info!("Instruction: {:?} {:?}", ix.program_id, ix.data);
@@ -839,23 +884,38 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
     let ObligationReserves {
         deposit_reserves,
         borrow_reserves,
-    } = obligation_reserves(&obligation, &reserves)?;
+    } = match obligation_reserves(&obligation, &reserves) {
+        Ok(reserves) => reserves,
+        Err(e) => {
+            error!("[Liquidation Thread] Error getting obligation reserves for {}: {}", address, e);
+            return Err(e);
+        }
+    };
 
-    let referrer_states = referrer_token_states_of_obligation(
+    let referrer_states = match referrer_token_states_of_obligation(
         address,
         &obligation,
         &borrow_reserves,
         &rts,
-    )?;
+    ) {
+        Ok(states) => states,
+        Err(e) => {
+            error!("[Liquidation Thread] Error getting referrer token states for {}: {}", address, e);
+            return Err(e);
+        }
+    };
 
-    kamino_lending::lending_market::lending_operations::refresh_obligation(
+    if let Err(e) = kamino_lending::lending_market::lending_operations::refresh_obligation(
         &mut obligation,
         &lending_market,
         clock.slot,
         deposit_reserves.into_iter(),
         borrow_reserves.into_iter(),
         referrer_states.into_iter(),
-    )?;
+    ) {
+        error!("[Liquidation Thread] Error refreshing obligation {}: {}", address, e);
+        return Err(e.into());
+    }
 
     let obligation_stats = math::obligation_info(address, &obligation);
     if obligation_stats.ltv > obligation_stats.unhealthy_ltv {
@@ -1044,17 +1104,38 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
             // Reload accounts
             let obligations = match ob {
                 None => {
-                    let obs = klend_client.fetch_obligations(market).await?;
-                    info!(
-                        "Fetched {} obligations in {}s",
-                        obs.len(),
-                        start.elapsed().as_secs()
-                    );
-                    obs
+                    match klend_client.fetch_obligations(market).await {
+                        Ok(obs) => {
+                            info!(
+                                "Fetched {} obligations in {}s",
+                                obs.len(),
+                                start.elapsed().as_secs()
+                            );
+                            obs
+                        }
+                        Err(e) => {
+                            error!("Error fetching obligations for market {}: {}", market, e);
+                            continue; // Skip this market and continue with the next one
+                        }
+                    }
                 }
-                Some(o) => vec![(obligation_filter.unwrap(), o)],
+                Some(o) => {
+                    if let Some(filter) = obligation_filter {
+                        vec![(filter, o)]
+                    } else {
+                        // This should not happen given the logic above, but we handle it safely
+                        error!("Unexpected state: obligation_filter is None when ob is Some");
+                        return Err(anyhow::anyhow!("Invalid state in obligation processing"));
+                    }
+                },
             };
-            let (rts, reserves, lending_market, clock) = refresh_market(klend_client, market, &vec![]).await?;
+            let (rts, reserves, lending_market, clock) = match refresh_market(klend_client, market, &vec![]).await {
+                Ok(result) => result,
+                Err(e) => {
+                    error!("Error refreshing market {}: {}", market, e);
+                    continue; // Skip this market and continue with the next one
+                }
+            };
 
             // Refresh all obligations second
             let SplitObligations {
@@ -1082,21 +1163,38 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
                 let ObligationReserves {
                     deposit_reserves,
                     borrow_reserves,
-                } = obligation_reserves(obligation, &reserves)?;
-                let referrer_states = referrer_token_states_of_obligation(
+                } = match obligation_reserves(obligation, &reserves) {
+                    Ok(reserves) => reserves,
+                    Err(e) => {
+                        error!("Error getting obligation reserves for {}: {}", address, e);
+                        continue; // Skip this obligation and continue with the next one
+                    }
+                };
+
+                let referrer_states = match referrer_token_states_of_obligation(
                     address,
                     obligation,
                     &borrow_reserves,
                     &rts,
-                )?;
-                kamino_lending::lending_market::lending_operations::refresh_obligation(
+                ) {
+                    Ok(states) => states,
+                    Err(e) => {
+                        error!("Error getting referrer token states for {}: {}", address, e);
+                        continue; // Skip this obligation and continue with the next one
+                    }
+                };
+
+                if let Err(e) = kamino_lending::lending_market::lending_operations::refresh_obligation(
                     obligation,
                     &lending_market,
                     clock.slot,
                     deposit_reserves.into_iter(),
                     borrow_reserves.into_iter(),
                     referrer_states.into_iter(),
-                )?;
+                ) {
+                    error!("Error refreshing obligation {}: {}", address, e);
+                    continue; // Skip this obligation and continue with the next one
+                }
 
                 // info!("Refreshed obligation: {}", address.to_string().green());
                 let obligation_stats = math::obligation_info(address, obligation);
@@ -1157,8 +1255,16 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
             info!("writing big_fish_near_liquidatable_obligations_map to file");
 
             // write big_fish_near_liquidatable_obligations_new_map to file
-            let file = File::create("big_fish_near_liquidatable_obligations.json").unwrap();
-            serde_json::to_writer_pretty(file, &big_fish_near_liquidatable_obligations_new_map).unwrap();
+            match File::create("big_fish_near_liquidatable_obligations.json") {
+                Ok(file) => {
+                    if let Err(e) = serde_json::to_writer_pretty(file, &big_fish_near_liquidatable_obligations_new_map) {
+                        error!("Error writing big_fish_near_liquidatable_obligations.json: {}", e);
+                    }
+                }
+                Err(e) => {
+                    error!("Error creating big_fish_near_liquidatable_obligations.json: {}", e);
+                }
+            }
         }
 
         {
@@ -1171,8 +1277,16 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
             info!("writing near_liquidatable_obligations_map to file");
 
             // write near_liquidatable_obligations_new_map to file
-            let file = File::create("near_liquidatable_obligations.json").unwrap();
-            serde_json::to_writer_pretty(file, &near_liquidatable_obligations_new_map).unwrap();
+            match File::create("near_liquidatable_obligations.json") {
+                Ok(file) => {
+                    if let Err(e) = serde_json::to_writer_pretty(file, &near_liquidatable_obligations_new_map) {
+                        error!("Error writing near_liquidatable_obligations.json: {}", e);
+                    }
+                }
+                Err(e) => {
+                    error!("Error creating near_liquidatable_obligations.json: {}", e);
+                }
+            }
         }
 
         sleep(sleep_duration).await;
@@ -1195,12 +1309,21 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey, obliga
         mut pyth_accounts,
         mut switchboard_accounts,
         mut scope_price_accounts,
-    } = oracle_accounts(&klend_client.client, &reserves)
-        .await
-        .unwrap();
-    let clock = sysvars::get_clock(&klend_client.client.client)
-        .await
-        .unwrap();
+    } = match oracle_accounts(&klend_client.client, &reserves).await {
+        Ok(accounts) => accounts,
+        Err(e) => {
+            error!("Error getting oracle accounts: {}", e);
+            return Err(e.into());
+        }
+    };
+
+    let clock = match sysvars::get_clock(&klend_client.client.client).await {
+        Ok(clock) => clock,
+        Err(e) => {
+            error!("Error getting clock: {}", e);
+            return Err(e.into());
+        }
+    };
     let pyth_account_infos = map_accounts_and_create_infos(&mut pyth_accounts);
     let switchboard_feed_infos = map_accounts_and_create_infos(&mut switchboard_accounts);
     let scope_price_infos = map_accounts_and_create_infos(&mut scope_price_accounts);
@@ -1231,7 +1354,13 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey, obliga
 
     // 只对需要refresh的reserves处理
     for key in keys_needing_refresh {
-        let reserve = reserves.get_mut(&key).unwrap();
+        let reserve = match reserves.get_mut(&key) {
+            Some(reserve) => reserve,
+            None => {
+                error!("Reserve {} not found in reserves map", key);
+                continue;
+            }
+        };
         info!(
             "Refreshing reserve {} token {} with status {}",
             key.to_string().green(),

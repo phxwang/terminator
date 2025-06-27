@@ -16,7 +16,7 @@ use spl_token_2022::{
     state::{Account as Token2022Account, Mint as Token2022Mint},
     ID as TOKEN_2022_PROGRAM_ID,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, error};
 
 use crate::{accounts::find_account, client::KlendClient, config::get_lending_markets};
 
@@ -114,7 +114,15 @@ impl Liquidator {
                     futures::future::join_all(get_or_create_atas_futures).await;
                 for (i, ata_option) in get_or_create_atas.into_iter().enumerate() {
                     if let Some(ata) = ata_option? {
-                        atas.insert(*mints.get(i).unwrap(), ata);
+                        match mints.get(i) {
+                            Some(mint) => {
+                                atas.insert(*mint, ata);
+                            }
+                            None => {
+                                error!("Index {} out of bounds for mints vector", i);
+                                continue;
+                            }
+                        }
                     }
                 }
                 info!(
@@ -171,7 +179,13 @@ impl Liquidator {
         }
 
         // Load SOL balance
-        let balance = client.get_balance(&self.wallet.pubkey()).await.unwrap();
+        let balance = match client.get_balance(&self.wallet.pubkey()).await {
+            Ok(balance) => balance,
+            Err(e) => {
+                error!("Error getting SOL balance for {}: {}", self.wallet.pubkey(), e);
+                0 // Default to 0 balance if we can't fetch it
+            }
+        };
         let ui_balance = balance as f64 / 10u64.pow(9) as f64;
         let sol_holding = Holding {
             mint: Pubkey::default(), // No mint, this is the native balance
@@ -229,13 +243,18 @@ async fn get_or_create_ata(
 
         info!("Creating ATA for mint {} using token program {}", mint, token_program_id);
         let ix = create_associated_token_account(owner_pubkey, owner_pubkey, mint, &token_program_id);
-        let tx = client
+        let tx = match client
             .client
             .tx_builder()
             .add_ix(ix)
             .build(&[])
-            .await
-            .unwrap();
+            .await {
+                Ok(tx) => tx,
+                Err(e) => {
+                    warn!("Error building transaction for ATA creation: {}", e);
+                    return Ok(None);
+                }
+            };
 
         match client.send_and_confirm_transaction(tx).await {
             Ok((sig, _)) => {
