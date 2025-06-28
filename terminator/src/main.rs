@@ -898,7 +898,7 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
     };
 
     let en = start.elapsed().as_secs_f64();
-    info!("[Liquidation Thread] Refreshed obligation reserves time used: {} in {}s", address.to_string().green(), en);
+    debug!("[Liquidation Thread] Refreshed obligation reserves time used: {} in {}s", address.to_string().green(), en);
 
     let referrer_states = match referrer_token_states_of_obligation(
         address,
@@ -914,7 +914,7 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
     };
 
     let en = start.elapsed().as_secs_f64();
-    info!("[Liquidation Thread] Refreshed token states time used: {} in {}s", address.to_string().green(), en);
+    debug!("[Liquidation Thread] Refreshed token states time used: {} in {}s", address.to_string().green(), en);
 
     if let Err(e) = kamino_lending::lending_market::lending_operations::refresh_obligation(
         &mut obligation,
@@ -929,7 +929,7 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
     }
 
     let en = start.elapsed().as_secs_f64();
-    info!("[Liquidation Thread] Refreshed obligation time used: {} in {}s", address.to_string().green(), en);
+    debug!("[Liquidation Thread] Refreshed obligation time used: {} in {}s", address.to_string().green(), en);
 
     let obligation_stats = math::obligation_info(address, &obligation);
     if obligation_stats.ltv > obligation_stats.unhealthy_ltv {
@@ -952,7 +952,7 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
     }
 
     let en = start.elapsed().as_secs_f64();
-    info!("[Liquidation Thread] Check and liquidate time used: {} in {}s", address.to_string().green(), en);
+    debug!("[Liquidation Thread] Check and liquidate time used: {} in {}s", address.to_string().green(), en);
 
     Ok(())
 }
@@ -1006,7 +1006,7 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
     };
 
     let en_clock = start.elapsed().as_secs_f64();
-    info!("Refreshing market clock time used: {}s", en_clock);
+    debug!("Refreshing market clock time used: {}s", en_clock);
 
 
     for (market, liquidatable_obligations) in obligations_map.iter() {
@@ -1049,7 +1049,7 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
             }
         };
         let refresh_en = refresh_start.elapsed().as_secs_f64();
-        info!("[Liquidation Thread] Refreshed market {} in {}s", market_pubkey.to_string().green(), refresh_en);
+        debug!("[Liquidation Thread] Refreshed market {} in {}s", market_pubkey.to_string().green(), refresh_en);
 
         for address_str in liquidatable_obligations.iter() {
             let address = match Pubkey::from_str(address_str) {
@@ -1084,7 +1084,7 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
             }
 
             let en = start.elapsed().as_secs_f64();
-            info!("[Liquidation Thread] Processed obligation time used: {} in {}s", address.to_string().green(), en);
+            debug!("[Liquidation Thread] Processed obligation time used: {} in {}s", address.to_string().green(), en);
         }
     }
     let en = start.elapsed().as_secs_f64();
