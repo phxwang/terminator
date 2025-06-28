@@ -881,6 +881,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, dont_re
 }
 
 async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, mut obligation: Obligation, lending_market: &LendingMarket, clock: &Clock, reserves: &HashMap<Pubkey, Reserve>, rts: &HashMap<Pubkey, ReferrerTokenState>) -> Result<()> {
+    let start = std::time::Instant::now();
     let ObligationReserves {
         deposit_reserves,
         borrow_reserves,
@@ -891,6 +892,9 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
             return Err(e);
         }
     };
+
+    let en = start.elapsed().as_secs_f64();
+    info!("[Liquidation Thread] Refreshed obligation reserves time used: {} in {}s", address.to_string().green(), en);
 
     let referrer_states = match referrer_token_states_of_obligation(
         address,
@@ -905,6 +909,9 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
         }
     };
 
+    let en = start.elapsed().as_secs_f64();
+    info!("[Liquidation Thread] Refreshed token states time used: {} in {}s", address.to_string().green(), en);
+
     if let Err(e) = kamino_lending::lending_market::lending_operations::refresh_obligation(
         &mut obligation,
         &lending_market,
@@ -916,6 +923,9 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
         error!("[Liquidation Thread] Error refreshing obligation {}: {}", address, e);
         return Err(e.into());
     }
+
+    let en = start.elapsed().as_secs_f64();
+    info!("[Liquidation Thread] Refreshed obligation time used: {} in {}s", address.to_string().green(), en);
 
     let obligation_stats = math::obligation_info(address, &obligation);
     if obligation_stats.ltv > obligation_stats.unhealthy_ltv {
@@ -937,10 +947,13 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
         debug!("[Liquidation Thread] Obligation is not liquidatable: {} {}", address.to_string().green(), obligation.to_string().green());
     }
 
+    let en = start.elapsed().as_secs_f64();
+    info!("[Liquidation Thread] Check and liquidate time used: {} in {}s", address.to_string().green(), en);
+
     Ok(())
 }
 
-async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, obligation_map: &mut HashMap<Pubkey, Obligation>, market_accounts_map: &mut HashMap<Pubkey, (MarketAccounts, HashMap<Pubkey, ReferrerTokenState>)>) -> Result<()> {
+async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, obligation_map: &mut HashMap<Pubkey, Obligation>, market_accounts_map: &mut HashMap<Pubkey, (HashMap<Pubkey, Reserve>, LendingMarket, HashMap<Pubkey, ReferrerTokenState>)>) -> Result<()> {
     let start = std::time::Instant::now();
 
     // load hashmap from scope.json file, need to check if the file exists
@@ -980,6 +993,18 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
 
     let mut obligation_reservers_to_refresh: Vec<Pubkey> = vec![];
 
+    let clock = match sysvars::get_clock(&klend_client.client.client).await {
+        Ok(clock) => clock,
+        Err(e) => {
+            error!("Error getting clock: {}", e);
+            return Err(e.into());
+        }
+    };
+
+    let en_clock = start.elapsed().as_secs_f64();
+    info!("Refreshing market clock time used: {}s", en_clock);
+
+
     for (market, liquidatable_obligations) in obligations_map.iter() {
         info!("[Liquidation Thread]{}: {} liquidatable obligations found", market.green(), liquidatable_obligations.len());
         total_liquidatable_obligations += liquidatable_obligations.len();
@@ -1000,15 +1025,20 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
                     continue;
                 }
             };
-            market_accounts_map.insert(market_pubkey, (market_accounts, rts));
+            market_accounts_map.insert(market_pubkey, (market_accounts.reserves, market_accounts.lending_market, rts));
         }
 
-        let (market_accounts, rts) = market_accounts_map.get(&market_pubkey).unwrap();
+        let (reserves, lending_market, rts) = market_accounts_map.get_mut(&market_pubkey).unwrap();
 
         //only refresh reserves in obligations
         let refresh_start = std::time::Instant::now();
-        let (reserves, lending_market, clock) = match refresh_market(klend_client, &market_pubkey, &obligation_reservers_to_refresh, &market_accounts).await {
-            Ok(result) => result,
+        match refresh_market(klend_client,
+            &market_pubkey,
+            &obligation_reservers_to_refresh,
+            reserves,
+            lending_market,
+            &clock).await {
+            Ok(_) => (),
             Err(e) => {
                 error!("[Liquidation Thread] Error refreshing market {}: {}", market_pubkey, e);
                 continue;
@@ -1025,6 +1055,8 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
                     continue;
                 }
             };
+
+            let start = std::time::Instant::now();
 
             if let Some(obligation) = obligation_map.get(&address) {
                 if let Err(e) = check_and_liquidate(klend_client, &address, *obligation, &lending_market, &clock, &reserves, &rts).await {
@@ -1046,6 +1078,9 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
                     }
                 }
             }
+
+            let en = start.elapsed().as_secs_f64();
+            info!("[Liquidation Thread] Processed obligation time used: {} in {}s", address.to_string().green(), en);
         }
     }
     let en = start.elapsed().as_secs_f64();
@@ -1057,7 +1092,7 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
 async fn loop_liquidate(klend_client: &Arc<KlendClient>, scope: String) -> Result<()> {
 
     let mut obligation_map: HashMap<Pubkey, Obligation> = HashMap::new();
-    let mut market_accounts_map: HashMap<Pubkey, (MarketAccounts, HashMap<Pubkey, ReferrerTokenState>)> = HashMap::new();
+    let mut market_accounts_map: HashMap<Pubkey, (HashMap<Pubkey, Reserve>, LendingMarket, HashMap<Pubkey, ReferrerTokenState>)> = HashMap::new();
 
     loop {
         if let Err(e) = liquidate_in_loop(klend_client, scope.clone(), &mut obligation_map, &mut market_accounts_map).await {
@@ -1151,8 +1186,12 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
                 }
             };
 
-            let (reserves, lending_market, clock) = match refresh_market(klend_client, market, &vec![], &market_accounts).await {
-                Ok(result) => result,
+            let mut reserves = market_accounts.reserves;
+            let mut lending_market = market_accounts.lending_market;
+            let clock = sysvars::clock(&klend_client.client.client).await;
+
+            match refresh_market(klend_client, market, &vec![], &mut reserves, &mut lending_market, &clock).await {
+                Ok(_) => (),
                 Err(e) => {
                     error!("Error refreshing market {}: {}", market, e);
                     continue; // Skip this market and continue with the next one
@@ -1324,10 +1363,9 @@ async fn load_market_accounts_and_rts(klend_client: &Arc<KlendClient>, market: &
     Ok((market_accs, rts))
 }
 
-async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  obligation_reservers_to_refresh: &Vec<Pubkey>,market_accs: &MarketAccounts)
--> Result<(HashMap<Pubkey, Reserve>,
-    LendingMarket,
-    Clock)> {
+async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  obligation_reservers_to_refresh: &Vec<Pubkey>,
+    reserves: &mut HashMap<Pubkey, Reserve>, lending_market: &mut LendingMarket, clock: &Clock)
+-> Result<()> {
     let start = std::time::Instant::now();
     //let market_accs = klend_client.fetch_market_and_reserves(market).await?;
 
@@ -1336,8 +1374,8 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
 
 
     //let rts = klend_client.fetch_referrer_token_states().await?;
-    let mut reserves = market_accs.reserves.clone();
-    let mut lending_market = market_accs.lending_market;
+    //let mut reserves = market_accs.reserves.clone();
+    // let mut lending_market = market_accs.lending_market;
     if lending_market.global_unhealthy_borrow_value == 0 {
         lending_market.global_unhealthy_borrow_value = lending_market.global_allowed_borrow_value;
     }
@@ -1359,17 +1397,6 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
 
     let en_oracle_accounts = start.elapsed().as_secs_f64();
     info!("Refreshing market oracle accounts {} time used: {}s", market.to_string().green(), en_oracle_accounts);
-
-    let clock = match sysvars::get_clock(&klend_client.client.client).await {
-        Ok(clock) => clock,
-        Err(e) => {
-            error!("Error getting clock: {}", e);
-            return Err(e.into());
-        }
-    };
-
-    let en_clock = start.elapsed().as_secs_f64();
-    info!("Refreshing market clock {} time used: {}s", market.to_string().green(), en_clock);
 
     let pyth_account_infos = map_accounts_and_create_infos(&mut pyth_accounts);
     let switchboard_feed_infos = map_accounts_and_create_infos(&mut switchboard_accounts);
@@ -1438,5 +1465,5 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
     let en_refresh_reserves = start.elapsed().as_secs_f64();
     info!("Refreshing market reserves {} time used: {}s", market.to_string().green(), en_refresh_reserves);
 
-    Ok((reserves, lending_market, clock))
+    Ok(())
 }
