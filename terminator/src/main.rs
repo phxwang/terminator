@@ -1400,7 +1400,7 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
     };
 
     let en_oracle_accounts = start.elapsed().as_secs_f64();
-    info!("Refreshing market oracle accounts {} time used: {}s", market.to_string().green(), en_oracle_accounts);
+    debug!("Refreshing market oracle accounts {} time used: {}s", market.to_string().green(), en_oracle_accounts);
 
     let pyth_account_infos = map_accounts_and_create_infos(&mut pyth_accounts);
     let switchboard_feed_infos = map_accounts_and_create_infos(&mut switchboard_accounts);
@@ -1439,7 +1439,7 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
                 continue;
             }
         };
-        info!(
+        debug!(
             "Refreshing reserve {} token {} with status {}",
             key.to_string().green(),
             reserve.config.token_info.symbol().purple(),
@@ -1467,7 +1467,7 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
     }
 
     let en_refresh_reserves = start.elapsed().as_secs_f64();
-    info!("Refreshing market reserves {} time used: {}s", market.to_string().green(), en_refresh_reserves);
+    debug!("Refreshing market reserves {} time used: {}s", market.to_string().green(), en_refresh_reserves);
 
     Ok(())
 }
