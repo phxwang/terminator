@@ -1391,7 +1391,7 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
         mut pyth_accounts,
         mut switchboard_accounts,
         mut scope_price_accounts,
-    } = match oracle_accounts(&klend_client.client, &reserves).await {
+    } = match oracle_accounts(&klend_client.local_client, &reserves).await {
         Ok(accounts) => accounts,
         Err(e) => {
             error!("Error getting oracle accounts: {}", e);
