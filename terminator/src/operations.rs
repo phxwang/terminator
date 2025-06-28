@@ -7,7 +7,7 @@ use kamino_lending::{
     utils::seeds::BASE_SEED_REFERRER_TOKEN_STATE, LendingMarket, Obligation, ReferrerTokenState,
     Reserve,
 };
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::{
     accounts::{map_accounts_and_create_infos, oracle_accounts, OracleAccounts},
@@ -115,7 +115,7 @@ pub fn refresh_reserve<'a>(
         )?;
     }
 
-    info!(
+    debug!(
         "{} {} reserve refreshed",
         reserve.config.token_info.symbol().purple(),
         key.to_string().bright_blue()
