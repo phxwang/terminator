@@ -49,6 +49,8 @@ pub struct KlendClient {
 
     pub client: OrbitLink<RpcClient, Keypair>,
 
+    pub local_client: OrbitLink<RpcClient, Keypair>,
+
     // Txn data
     pub lookup_table: Option<AddressLookupTableAccount>,
 
@@ -72,6 +74,7 @@ pub struct RebalanceConfig {
 impl KlendClient {
     pub fn init(
         client: OrbitLink<RpcClient, Keypair>,
+        local_client: OrbitLink<RpcClient, Keypair>,
         program_id: Pubkey,
         rebalance_config: Option<RebalanceConfig>,
     ) -> Result<Self> {
@@ -84,6 +87,7 @@ impl KlendClient {
         Ok(Self {
             program_id,
             client,
+            local_client,
             lookup_table: None,
             liquidator,
             rebalance_config,

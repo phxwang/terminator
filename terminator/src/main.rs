@@ -993,7 +993,7 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
 
     let mut obligation_reservers_to_refresh: Vec<Pubkey> = vec![];
 
-    let clock = match sysvars::get_clock(&klend_client.client.client).await {
+    let clock = match sysvars::get_clock(&klend_client.local_client.client).await {
         Ok(clock) => clock,
         Err(e) => {
             error!("Error getting clock: {}", e);
