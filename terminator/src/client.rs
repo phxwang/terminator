@@ -317,7 +317,7 @@ impl KlendClient {
                 return Err(anyhow!("Max retries reached"));
             }
             let (sig, res) = self
-                .client
+                .local_client
                 .send_retry_and_confirm_transaction(tx.clone(), None, false)
                 .await?;
             if let Some(Err(TransactionError::BlockhashNotFound)) = res {

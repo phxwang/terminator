@@ -232,7 +232,7 @@ async fn get_or_create_ata(
     // Calculate ATA address using the correct token program
     let ata =get_associated_token_address_with_program_id(owner_pubkey, mint, &token_program_id);
 
-    if !matches!(find_account(&client.client.client, ata).await, Ok(None)) {
+    if !matches!(find_account(&client.local_client.client, ata).await, Ok(None)) {
         debug!("Liquidator ATA for mint {} exists: {}", mint, ata);
         Ok(Some(ata))
     } else {
@@ -268,7 +268,7 @@ async fn get_or_create_ata(
                 Ok(Some(ata))
             }
             Err(e) => {
-                warn!("Error creating ata for liquidator: {}, mint: {}, ata: {}, error: {:?}", owner.pubkey(), mint, ata, e);
+                warn!("Error creating ata for liquidator: {}, mint: {}, ata: {}, program_id: {:?}, error: {:?}", owner.pubkey(), mint, ata, token_program_id, e);
                 Ok(None)
             }
         }

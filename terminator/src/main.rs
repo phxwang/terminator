@@ -825,7 +825,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, dont_re
         ixns.extend_from_slice(&flash_repay_ixns);
 
         // TODO: add compute budget + prio fees
-        let mut txn = klend_client.client.tx_builder().add_ixs(ixns.clone());
+        let mut txn = klend_client.local_client.tx_builder().add_ixs(ixns.clone());
         for lut in luts {
             txn = txn.add_lookup_table(lut);
         }
@@ -850,7 +850,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, dont_re
         }
 
          match klend_client
-                .client
+                .local_client
                 .client
                 .simulate_transaction(&txn)
                 .await
@@ -860,9 +860,9 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, dont_re
 
                         let simulate_only = false;
 
-                        if !simulate_only && res.value.err.is_none() {
+                        if !simulate_only {
                             match klend_client
-                                .client
+                                .local_client
                                 .send_retry_and_confirm_transaction(txn, None, false)
                                 .await
                                 {
