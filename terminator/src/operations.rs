@@ -124,7 +124,6 @@ pub fn refresh_reserve<'a>(
     Ok(())
 }
 
-#[derive(Clone)]
 pub struct ObligationReserves {
     pub borrow_reserves: Vec<StateWithKey<Reserve>>,
     pub deposit_reserves: Vec<StateWithKey<Reserve>>,
@@ -133,7 +132,7 @@ pub struct ObligationReserves {
 pub fn obligation_reserves(
     obligation: &Obligation,
     reserve_states: &HashMap<Pubkey, Reserve>,
-) -> Result<(Vec<StateWithKey<Reserve>>, Vec<StateWithKey<Reserve>>)> {
+) -> Result<ObligationReserves> {
     let mut deposit_reserves: Vec<StateWithKey<Reserve>> = vec![];
     for deposit in obligation.deposits.iter() {
         if deposit.deposit_reserve != Pubkey::default() {
@@ -162,7 +161,10 @@ pub fn obligation_reserves(
         }
     }
 
-    Ok((deposit_reserves, borrow_reserves))
+    Ok(ObligationReserves {
+        deposit_reserves,
+        borrow_reserves,
+    })
 }
 
 pub struct SplitObligations {
@@ -236,7 +238,10 @@ pub async fn refresh_reserves_and_obligation(
         }
     };
 
-    let (deposit_reserves, borrow_reserves) = obligation_reserves(obligation_state, reserves)?;
+    let ObligationReserves {
+        borrow_reserves,
+        deposit_reserves,
+    } = obligation_reserves(obligation_state, reserves)?;
     let referrer_states = referrer_token_states_of_obligation(
         obligation_addr,
         obligation_state,
