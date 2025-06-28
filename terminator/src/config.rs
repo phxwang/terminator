@@ -72,8 +72,10 @@ pub fn get_client_for_action(args: &Args) -> Result<KlendClient> {
         Duration::from_secs(300),
         commitment,
     );
+
+    let (local_payer, placeholder) = get_keypair_for_action(&args.keypair)?;
     let local_orbit_link: OrbitLink<RpcClient, Keypair> =
-        OrbitLink::new(local_rpc, payer, None, commitment, placeholder)?;
+        OrbitLink::new(local_rpc, local_payer, None, commitment, placeholder)?;
     let rebalance_config = get_rebalance_config_for_action(&args.action);
     let klend_client = KlendClient::init(
         orbit_link,

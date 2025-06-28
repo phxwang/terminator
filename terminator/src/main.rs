@@ -65,6 +65,10 @@ pub struct Args {
     #[clap(long, env, parse(try_from_str), default_value = "localnet")]
     cluster: Cluster,
 
+    /// Connect to solana validator
+    #[clap(long, env, parse(try_from_str), default_value = "localnet")]
+    local_cluster: Cluster,
+
     /// Account keypair to pay for the transactions
     #[clap(long, env, parse(from_os_str))]
     keypair: Option<PathBuf>,
