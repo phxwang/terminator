@@ -27,7 +27,7 @@ use crate::{
     model::StateWithKey,
     operations::{
         obligation_reserves, referrer_token_states_of_obligation, split_obligations,
-        ObligationReserves, SplitObligations,
+        SplitObligations,
     },
     px::fetch_jup_prices,
     utils::get_all_reserve_mints,
@@ -880,21 +880,15 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, dont_re
     Ok(())
 }
 
-async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, mut obligation: Obligation, lending_market: &LendingMarket, clock: &Clock, reserves: &HashMap<Pubkey, Reserve>, rts: &HashMap<Pubkey, ReferrerTokenState>) -> Result<()> {
+async fn check_and_liquidate(klend_client: &Arc<KlendClient>,
+    address: &Pubkey,
+    mut obligation: Obligation,
+    borrow_reserves: Vec<StateWithKey<Reserve>>,
+    deposit_reserves: Vec<StateWithKey<Reserve>>,
+    lending_market: &LendingMarket,
+    clock: &Clock,
+    rts: &HashMap<Pubkey, ReferrerTokenState>) -> Result<()> {
     let start = std::time::Instant::now();
-    let ObligationReserves {
-        deposit_reserves,
-        borrow_reserves,
-    } = match obligation_reserves(&obligation, &reserves) {
-        Ok(reserves) => reserves,
-        Err(e) => {
-            error!("[Liquidation Thread] Error getting obligation reserves for {}: {}", address, e);
-            return Err(e);
-        }
-    };
-
-    let en = start.elapsed().as_secs_f64();
-    info!("[Liquidation Thread] Refreshed obligation reserves time used: {} in {}s", address.to_string().green(), en);
 
     let referrer_states = match referrer_token_states_of_obligation(
         address,
@@ -953,7 +947,10 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
     Ok(())
 }
 
-async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, obligation_map: &mut HashMap<Pubkey, Obligation>, market_accounts_map: &mut HashMap<Pubkey, (HashMap<Pubkey, Reserve>, LendingMarket, HashMap<Pubkey, ReferrerTokenState>)>) -> Result<()> {
+async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String,
+    obligation_map: &mut HashMap<Pubkey, Obligation>,
+    obligation_reserves_map: &mut HashMap<Pubkey, (Vec<StateWithKey<Reserve>>, Vec<StateWithKey<Reserve>>)>,
+    market_accounts_map: &mut HashMap<Pubkey, (HashMap<Pubkey, Reserve>, LendingMarket, HashMap<Pubkey, ReferrerTokenState>)>) -> Result<()> {
     let start = std::time::Instant::now();
 
     // load hashmap from scope.json file, need to check if the file exists
@@ -1000,9 +997,6 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
             return Err(e.into());
         }
     };
-
-    let en_clock = start.elapsed().as_secs_f64();
-    info!("Refreshing market clock time used: {}s", en_clock);
 
 
     for (market, liquidatable_obligations) in obligations_map.iter() {
@@ -1058,25 +1052,35 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
 
             let start = std::time::Instant::now();
 
-            if let Some(obligation) = obligation_map.get(&address) {
-                if let Err(e) = check_and_liquidate(klend_client, &address, *obligation, &lending_market, &clock, &reserves, &rts).await {
-                    error!("[Liquidation Thread] Error checking/liquidating obligation {}: {}", address, e);
-                }
-            } else {
+            if !(obligation_map.contains_key(&address)) {
                 match klend_client.fetch_obligation(&address).await {
                     Ok(obligation) => {
                         obligation_map.insert(address, obligation);
                         obligation_reservers_to_refresh.extend(obligation.deposits.iter().map(|coll| coll.deposit_reserve));
                         obligation_reservers_to_refresh.extend(obligation.borrows.iter().map(|borrow| borrow.borrow_reserve));
-                        if let Err(e) = check_and_liquidate(klend_client, &address, obligation, &lending_market, &clock, &reserves, &rts).await {
-                            error!("[Liquidation Thread] Error checking/liquidating obligation {}: {}", address, e);
-                        }
+
+                        let (borrow_reserves, deposit_reserves) = match obligation_reserves(&obligation, &reserves) {
+                            Ok((borrow_reserves, deposit_reserves)) => (borrow_reserves, deposit_reserves),
+                            Err(e) => {
+                                error!("[Liquidation Thread] Error getting obligation reserves for {}: {}", address, e);
+                                return Err(e);
+                            }
+                        };
+                        obligation_reserves_map.insert(address, (borrow_reserves, deposit_reserves));
                     }
                     Err(e) => {
                         error!("[Liquidation Thread] Error fetching obligation {}: {}", address, e);
                         continue;
                     }
                 }
+            }
+
+            let obligation = obligation_map.get_mut(&address).unwrap();
+            let (borrow_reserves, deposit_reserves) = obligation_reserves_map.get(&address).unwrap();
+            let borrow_reserves_owned = borrow_reserves.clone();
+            let deposit_reserves_owned = deposit_reserves.clone();
+            if let Err(e) = check_and_liquidate(klend_client, &address, *obligation, borrow_reserves_owned, deposit_reserves_owned, &lending_market, &clock, &rts).await {
+                error!("[Liquidation Thread] Error checking/liquidating obligation {}: {}", address, e);
             }
 
             let en = start.elapsed().as_secs_f64();
@@ -1093,9 +1097,10 @@ async fn loop_liquidate(klend_client: &Arc<KlendClient>, scope: String) -> Resul
 
     let mut obligation_map: HashMap<Pubkey, Obligation> = HashMap::new();
     let mut market_accounts_map: HashMap<Pubkey, (HashMap<Pubkey, Reserve>, LendingMarket, HashMap<Pubkey, ReferrerTokenState>)> = HashMap::new();
+    let mut obligation_reserves_map: HashMap<Pubkey, (Vec<StateWithKey<Reserve>>, Vec<StateWithKey<Reserve>>)> = HashMap::new();
 
     loop {
-        if let Err(e) = liquidate_in_loop(klend_client, scope.clone(), &mut obligation_map, &mut market_accounts_map).await {
+        if let Err(e) = liquidate_in_loop(klend_client, scope.clone(), &mut obligation_map, &mut obligation_reserves_map, &mut market_accounts_map).await {
             error!("[Liquidation Thread] Error: {}", e);
         }
     }
@@ -1221,10 +1226,7 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
                 // info!("Processing obligation {:?}", address);
 
                 // Refresh the obligation
-                let ObligationReserves {
-                    deposit_reserves,
-                    borrow_reserves,
-                } = match obligation_reserves(obligation, &reserves) {
+                let (borrow_reserves, deposit_reserves) = match obligation_reserves(obligation, &reserves) {
                     Ok(reserves) => reserves,
                     Err(e) => {
                         error!("Error getting obligation reserves for {}: {}", address, e);
@@ -1402,18 +1404,19 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
     let switchboard_feed_infos = map_accounts_and_create_infos(&mut switchboard_accounts);
     let scope_price_infos = map_accounts_and_create_infos(&mut scope_price_accounts);
 
-    let refresh_set: HashSet<&Pubkey> = obligation_reservers_to_refresh.iter().collect();
-    if !refresh_set.is_empty() {
-        reserves.retain(|key, _| refresh_set.contains(key));
-    }
+    let obligation_reservers_to_refresh_set: HashSet<&Pubkey> = obligation_reservers_to_refresh.iter().collect();
 
     // 预先过滤出真正需要refresh的reserves的keys
     let keys_needing_refresh: Vec<_> = reserves
         .iter()
-        .filter(|(_key, reserve)| {
+        .filter(|(key, reserve)| {
             // 检查是否需要refresh
             let ignore_tokens = ["CHAI"];
             if ignore_tokens.contains(&reserve.config.token_info.symbol()) {
+                return false;
+            }
+
+            if !obligation_reservers_to_refresh_set.contains(key) {
                 return false;
             }
 
