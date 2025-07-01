@@ -4,7 +4,6 @@ use anchor_client::{solana_sdk::pubkey::Pubkey, Cluster};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use consts::WRAPPED_SOL_MINT;
 use juno::DecompiledVersionedTx;
 use kamino_lending::{Reserve, LendingMarket, ReferrerTokenState, Obligation};
 use solana_sdk::{
@@ -171,11 +170,6 @@ pub enum Actions {
     },
 
     #[clap()]
-    Rebalance {
-        #[clap(flatten)]
-        rebalance_args: RebalanceArgs,
-    },
-    #[clap()]
     LoopLiquidate {
         #[clap(long, env, parse(try_from_str))]
         scope: String,
@@ -263,154 +257,10 @@ async fn main() -> Result<()> {
             slippage_pct,
             rebalance_args: _,
         } => swap::swap_action(&klend_client, from, to, amount, slippage_pct).await,
-        Actions::Rebalance { rebalance_args: _ } => rebalance(&klend_client).await,
         Actions::LoopLiquidate { scope, rebalance_args: _ } => loop_liquidate(&klend_client, scope).await,
     }
 }
 
-async fn rebalance(klend_client: &Arc<KlendClient>) -> Result<()> {
-    let lending_markets = get_lending_markets(&klend_client.program_id).await?;
-
-    info!("Rebalancing...");
-    let rebalance_config = match &klend_client.rebalance_config {
-        None => Err(anyhow::anyhow!("Rebalance settings not found")),
-        Some(c) => Ok(c),
-    }?;
-    let RebalanceConfig {
-        base_token,
-        min_sol_balance,
-        rebalance_slippage_pct: slippage,
-        ..
-    } = rebalance_config;
-    info!(
-        "Loading markets and reserves for {} markets..",
-        lending_markets.len()
-    );
-    let markets =
-        crate::client::utils::fetch_markets_and_reserves(klend_client, &lending_markets).await?;
-    let (all_reserves, _ctoken_mints, liquidity_mints) = get_all_reserve_mints(&markets);
-    info!("Loading Jupiter prices..");
-    let amount = 100.0;
-    let pxs = fetch_jup_prices(&liquidity_mints, &rebalance_config.usdc_mint, amount).await?;
-    info!("Loading holdings..");
-    let mut holdings = klend_client
-        .liquidator
-        .fetch_holdings(&klend_client.client.client, &all_reserves)
-        .await?;
-
-    let base = holdings.holding_of(base_token).unwrap();
-    info!(
-        "Base {:?} {} holding {}",
-        base.mint, base.label, base.ui_balance
-    );
-    let sol_holding = &holdings.sol;
-    info!(
-        "SOL holding {}, Min sol holding {}",
-        sol_holding.ui_balance, min_sol_balance
-    );
-
-    // Rules:
-    // - if sol_balance < min_sol -> base token swaps into min_sol balance at least
-    // - if sol_balance > min_sol * 2 -> swap the diff from current_sol - min_sol * 2 -> base token
-    // - every non base token goes into base token if > $1 -> swap it partially at most $20k at a time
-
-    const SOL_BUFFER_FACTOR: f64 = 2.0;
-    let sol_balance = sol_holding.ui_balance;
-
-    if sol_balance < *min_sol_balance {
-        // Swap base token into SOL to reach min sol balance
-        let target = min_sol_balance * SOL_BUFFER_FACTOR;
-        let missing = target - sol_balance;
-
-        let px_sol_to_base = pxs.a_to_b(&WRAPPED_SOL_MINT, base_token);
-        let base_to_swap = missing * px_sol_to_base * (1.0 + slippage / 100.0);
-
-        info!("Sol balance {} is below min_balance {} so we are topping up to {}, therefore acquiring {} more SOL, sol_price_to_base {}, swapping base {}",
-            sol_balance,
-            min_sol_balance,
-            target,
-            missing,
-            px_sol_to_base,
-            base_to_swap
-        );
-
-        // TODO: make these ixns go together
-        swap::swap(
-            klend_client,
-            &holdings,
-            base_token,
-            &sol_holding.mint,
-            base_to_swap,
-            *slippage,
-        )
-        .await?;
-
-        let _ = accounts::unwrap_wsol_ata(klend_client).await?;
-
-        // Reload holdings
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        holdings = klend_client
-            .liquidator
-            .fetch_holdings(&klend_client.client.client, &all_reserves)
-            .await?;
-    }
-
-    // TODO: If we have too much wsol and it's not the base asset
-    // then just unwrap it
-    // accounts::unwrap_wsol_ata(klend_client).await;
-    if rebalance_config.base_token != WRAPPED_SOL_MINT {
-        let wsol_holding = holdings.holding_of(&WRAPPED_SOL_MINT).unwrap();
-        if wsol_holding.usd_value > 1.0 {
-            info!("Unwrapping {} WSOL", wsol_holding.ui_balance);
-            let _ = accounts::unwrap_wsol_ata(klend_client).await?;
-
-            // Reload holdings
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            klend_client
-                .liquidator
-                .fetch_holdings(&klend_client.client.client, &all_reserves)
-                .await?;
-        }
-    }
-
-    // Now swap the remaining
-    for Holding {
-        mint,
-        ui_balance,
-        usd_value,
-        label,
-        ..
-    } in holdings.holdings.clone().into_iter()
-    {
-        if &mint == base_token {
-            continue;
-        }
-
-        if usd_value < rebalance_config.non_swappable_dust_usd_value {
-            // We don't swap it, too small
-            continue;
-        }
-
-        // Swap the whole thing
-        let px = pxs.a_to_b(&mint, base_token);
-        let estimated_base = ui_balance * px * (1.0 + slippage / 100.0);
-        info!(
-            "Swapping non-base token {} amount: {} expecting back {} base",
-            label, ui_balance, estimated_base
-        );
-
-        swap::swap(
-            klend_client,
-            &holdings,
-            &mint,
-            base_token,
-            ui_balance,
-            *slippage,
-        )
-        .await?;
-    }
-    Ok(())
-}
 
 pub mod swap {
     use super::*;
