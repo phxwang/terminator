@@ -1324,8 +1324,8 @@ async fn load_market_accounts_and_rts(klend_client: &Arc<KlendClient>, market: &
 async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  obligation_reservers_to_refresh: &Vec<Pubkey>,
     reserves: &mut HashMap<Pubkey, Reserve>, lending_market: &mut LendingMarket, clock: &Clock,
     mut scope_price_accounts: Option<&mut Vec<(Pubkey, bool, Account)>>,
-    switchboard_accounts: Option<&mut Vec<(Pubkey, bool, Account)>>,
-    updated_scope_account_data: Option<&HashMap<Pubkey, Vec<u8>>>)
+    mut switchboard_accounts: Option<&mut Vec<(Pubkey, bool, Account)>>,
+    updated_account_data: Option<&HashMap<Pubkey, Vec<u8>>>)
 -> Result<()> {
     let start = std::time::Instant::now();
     //let market_accs = klend_client.fetch_market_and_reserves(market).await?;
@@ -1344,7 +1344,7 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
     //let en_rts = start.elapsed().as_secs_f64();
     //info!("Refreshing market referrer token states {} time used: {}s", market.to_string().green(), en_rts);
 
-    let (mut pyth_accounts, mut switchboard_accounts, mut scope_price_accounts_vec) = match updated_scope_account_data {
+    let (mut pyth_accounts, mut switchboard_accounts, mut scope_price_accounts_vec) = match updated_account_data {
         Some(updated_account_data) => {
             // Update existing scope price accounts with new data
             if let Some(ref mut accounts) = scope_price_accounts {
@@ -1353,14 +1353,21 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
                         scope_price_account.2.data = data.clone();
                     }
                 }
-
-                let switchboard_accounts_clone = switchboard_accounts.unwrap().clone();
-                println!("switchboard_accounts_clone: {:?}", switchboard_accounts_clone);
-
-                (Vec::new(), switchboard_accounts_clone, accounts.clone())
             } else {
                 return Err(anyhow::anyhow!("scope_price_accounts parameter is required when updated_scope_account_data is provided"));
             }
+
+            if let Some(ref mut accounts) = switchboard_accounts {
+                for (key, data) in updated_account_data.iter() {
+                    if let Some(switchboard_account) = accounts.iter_mut().find(|(k, _, _)| *k == *key) {
+                        switchboard_account.2.data = data.clone();
+                    }
+                }
+            } else {
+                return Err(anyhow::anyhow!("switchboard_accounts parameter is required when updated_account_data is provided"));
+            }
+
+            (Vec::new(), switchboard_accounts.unwrap().clone(), scope_price_accounts.unwrap().clone())
         }
         None => {
             let OracleAccounts {

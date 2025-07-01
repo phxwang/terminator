@@ -249,7 +249,9 @@ pub async fn account_update_ws(
 ) -> anyhow::Result<()> {
 
     // Collect all scope price account keys
-    let pubkeys = all_scope_price_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
+    let scope_price_pubkeys = all_scope_price_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
+    let switchboard_pubkeys = all_switchboard_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
+    let pubkeys = [scope_price_pubkeys, switchboard_pubkeys].concat();
     log::info!("account update ws: {:?}", pubkeys);
 
     let mut accounts = HashMap::new();
