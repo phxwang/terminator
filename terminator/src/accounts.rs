@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::sync::Arc;
 
 use anchor_client::{
     solana_client::{
@@ -11,20 +11,23 @@ use anchor_client::{
 use anchor_lang::Id;
 use anchor_spl::token::Token;
 use anyhow::Result;
-use backoff::{backoff::Constant, future::retry};
 use futures::SinkExt;
 use futures_util::stream::StreamExt;
-use kamino_lending::{LendingMarket, Reserve};
+use kamino_lending::{LendingMarket, Reserve, Obligation, ReferrerTokenState};
 use log;
 use orbit_link::{async_client::AsyncClient, OrbitLink};
 use spl_associated_token_account::instruction::create_associated_token_account;
 use tracing::info;
 use yellowstone_grpc_proto::prelude::{SubscribeRequest, SubscribeRequestFilterAccounts, subscribe_update::UpdateOneof};
+use scope::OraclePrices as ScopePrices;
 
 use crate::{
     client::{rpc, KlendClient},
     consts::WRAPPED_SOL_MINT,
     yellowstone_transaction::create_yellowstone_client,
+    refresh_market,
+    scan_obligations,
+    sysvars,
 };
 
 pub fn create_is_signer_account_infos<'a>(
@@ -96,22 +99,7 @@ pub async fn oracle_accounts<T: AsyncClient, S: Signer>(
     let mut switchboard_keys = HashSet::new();
     let mut scope_keys = HashSet::new();
 
-    for (_, reserve) in reserves.iter() {
-        let pyth_key = reserve.config.token_info.pyth_configuration.price;
-        let sb_price_key = reserve.config.token_info.switchboard_configuration.price_aggregator;
-        let sb_twap_key = reserve.config.token_info.switchboard_configuration.twap_aggregator;
-        let scope_key = reserve.config.token_info.scope_configuration.price_feed;
-
-        pyth_keys.insert(pyth_key);
-        switchboard_keys.insert(sb_price_key);
-        switchboard_keys.insert(sb_twap_key);
-        scope_keys.insert(scope_key);
-
-        all_oracle_keys.insert(pyth_key);
-        all_oracle_keys.insert(sb_price_key);
-        all_oracle_keys.insert(sb_twap_key);
-        all_oracle_keys.insert(scope_key);
-    }
+    refresh_oracle_keys(reserves, &mut all_oracle_keys, &mut pyth_keys, &mut switchboard_keys, &mut scope_keys);
 
     let all_keys: Vec<Pubkey> = all_oracle_keys.into_iter().collect();
     let all_accounts = client.client.get_multiple_accounts(&all_keys).await?;
@@ -141,6 +129,27 @@ pub async fn oracle_accounts<T: AsyncClient, S: Signer>(
         switchboard_accounts,
         scope_price_accounts,
     })
+}
+
+pub fn refresh_oracle_keys(reserves: &HashMap<Pubkey, Reserve>, all_oracle_keys: &mut HashSet<Pubkey>, pyth_keys: &mut HashSet<Pubkey>, switchboard_keys: &mut HashSet<Pubkey>, scope_keys: &mut HashSet<Pubkey>) {
+    for (_, reserve) in reserves.iter() {
+        let pyth_key = reserve.config.token_info.pyth_configuration.price;
+        let sb_price_key = reserve.config.token_info.switchboard_configuration.price_aggregator;
+        let sb_twap_key = reserve.config.token_info.switchboard_configuration.twap_aggregator;
+        let scope_key = reserve.config.token_info.scope_configuration.price_feed;
+
+        info!("reserve: {:?}, pyth_key: {:?}, sb_price_key: {:?}, sb_twap_key: {:?}, scope_key: {:?}", reserve.config.token_info.name, pyth_key, sb_price_key, sb_twap_key, scope_key);
+
+        pyth_keys.insert(pyth_key);
+        switchboard_keys.insert(sb_price_key);
+        switchboard_keys.insert(sb_twap_key);
+        scope_keys.insert(scope_key);
+
+        all_oracle_keys.insert(pyth_key);
+        all_oracle_keys.insert(sb_price_key);
+        all_oracle_keys.insert(sb_twap_key);
+        all_oracle_keys.insert(scope_key);
+    }
 }
 
 #[macro_export]
@@ -228,13 +237,24 @@ pub async fn find_account(
     }
 }
 
-pub async fn account_update_ws(pubkey: Option<Pubkey>) -> anyhow::Result<()> {
-    log::info!("account_update_ws");
+pub async fn account_update_ws(
+    klend_client: &Arc<KlendClient>,
+    market_pubkey: &Pubkey,
+    liquidatable_obligations: &Vec<String>,
+    mut scope_price_accounts: &mut Vec<(Pubkey, bool, Account)>,
+    mut switchboard_accounts: &mut Vec<(Pubkey, bool, Account)>,
+    mut reserves: &mut HashMap<Pubkey, Reserve>,
+    mut lending_market: &mut LendingMarket,
+    rts: &HashMap<Pubkey, ReferrerTokenState>,
+) -> anyhow::Result<()> {
+
+    let pubkeys = scope_price_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
+    log::info!("account update ws: {:?}", pubkeys);
+
     let mut accounts = HashMap::new();
-    let account_filter = match pubkey {
-        Some(key) => vec![key.to_string()],
-        None => vec![],
-    };
+    let mut obligation_map: HashMap<Pubkey, Obligation> = HashMap::new();
+    let mut obligation_reservers_to_refresh: Vec<Pubkey> = vec![];
+    let account_filter = pubkeys.iter().map(|key| key.to_string()).collect::<Vec<String>>();
     accounts.insert(
         "client".to_string(),
         SubscribeRequestFilterAccounts {
@@ -243,77 +263,84 @@ pub async fn account_update_ws(pubkey: Option<Pubkey>) -> anyhow::Result<()> {
             filters: vec![],
         },
     );
-    // let x_token = None;
-    retry(Constant::new(Duration::from_secs(1)), move || {
-        let accounts = accounts.clone();
-        let endpoint = "ws://198.244.253.218:10000".to_string();
-        let x_token = None;
-        //let orderbook_ladder = self.orderbook_ladder.clone();
 
-        async move {
-            let mut client = create_yellowstone_client(&endpoint, &x_token, 10).await?;
-            let (mut subscribe_tx, mut stream) = client.subscribe().await.map_err(|e| {
-                anyhow::Error::msg(format!(
-                    "Failed to subscribe: {} ({})",
-                    endpoint, e
-                ))
-            })?;
-            log::info!("Connected to the gRPC server");
-            subscribe_tx
-                .send(SubscribeRequest {
-                    slots: HashMap::new(),
-                    accounts,
-                    transactions: HashMap::new(),
-                    blocks: HashMap::new(),
-                    blocks_meta: HashMap::new(),
-                    commitment: None,
-                    accounts_data_slice: vec![],
-                    transactions_status: HashMap::new(),
-                    ping: None,
-                    entry: HashMap::new(),
-                })
-                .await
-                .map_err(|e| {
-                    anyhow::Error::msg(format!(
-                        "Failed to send: {} ({})",
-                        endpoint, e
-                    ))
-                })?;
-            while let Some(message) = stream.next().await {
-                if let Ok(msg) = message {
-                    if let Some(UpdateOneof::Account(account)) = msg.update_oneof {
-                        // let slot = account.slot;
-                        let account = account.account;
+    let endpoint = "ws://198.244.253.218:10000".to_string();
+    let x_token = None;
 
-                        if let Some(_account) = account {
+    let mut client = create_yellowstone_client(&endpoint, &x_token, 10).await?;
+    let (mut subscribe_tx, mut stream) = client.subscribe().await.map_err(|e| {
+        anyhow::Error::msg(format!(
+            "Failed to subscribe: {} ({})",
+            endpoint, e
+        ))
+    })?;
+    log::info!("Connected to the gRPC server");
+    subscribe_tx
+        .send(SubscribeRequest {
+            slots: HashMap::new(),
+            accounts,
+            transactions: HashMap::new(),
+            blocks: HashMap::new(),
+            blocks_meta: HashMap::new(),
+            commitment: None,
+            accounts_data_slice: vec![],
+            transactions_status: HashMap::new(),
+            ping: None,
+            entry: HashMap::new(),
+        })
+        .await
+        .map_err(|e| {
+            anyhow::Error::msg(format!(
+                "Failed to send: {} ({})",
+                endpoint, e
+            ))
+        })?;
 
-                            //let (header_bytes, market_bytes) = account.data.split_at(size_of::<MarketHeader>());
-                            //let header = bytemuck::try_from_bytes::<MarketHeader>(header_bytes).unwrap();
-                            //let market = load_with_dispatch(&header.market_size_params, market_bytes)
-                            //    .unwrap()
-                            //    .inner;
-                            //let state = market.get_trader_state(&pubkey);
-                            //if let Some(state) = state {
-                                //log::info!("Account state: {:?}", state);
-                                //let base_qty = meta.base_lots_to_base_atoms(state.base_lots_free.as_u64()) as f64 / meta.base_atoms_per_raw_base_unit as f64;
-                                //let quote_qty = meta.quote_lots_to_quote_atoms(state.quote_lots_free.as_u64()) as f64 / meta.quote_atoms_per_quote_unit as f64;
-                                //let base_locked_qty = meta.base_lots_to_base_atoms(state.base_lots_locked.as_u64()) as f64 / meta.base_atoms_per_raw_base_unit as f64;
-                                //let quote_locked_qty = meta.quote_lots_to_quote_atoms(state.quote_lots_locked.as_u64()) as f64 / meta.quote_atoms_per_quote_unit as f64;
+    while let Some(message) = stream.next().await {
+        if let Ok(msg) = message {
+            if let Some(UpdateOneof::Account(account)) = msg.update_oneof {
+                let account = account.account;
 
-                                //log::info!("Base: {}, Quote: {}, Base Locked: {}, Quote Locked {}", base_qty, quote_qty, base_locked_qty, quote_locked_qty);
-                            //}
-                            // update order book
-                            //let ladder = Orderbook::from_ladder(&market.get_ladder(5), &meta);
-                            //log::info!("{:#?}", ladder);
-                            //*orderbook_ladder.write().await = Some(ladder);
-                        }
-                    }
-                } else {
-                    log::info!("Account Update error: {:?}", message);
-                    break;
+                if let Some(account) = account {
+
+                    let start = std::time::Instant::now();
+                    let data = account.data;
+                    let pubkey = Pubkey::try_from(account.pubkey.as_slice()).unwrap();
+                    let scope_prices = bytemuck::from_bytes::<ScopePrices>(&data[8..]);
+                    log::info!("Account: {:?}, scope_prices updated: {:?}", pubkey, scope_prices.prices.len());
+
+                    //update reserves
+                    let clock = sysvars::clock(&klend_client.client.client).await;
+                    let _ = refresh_market(klend_client,
+                        &market_pubkey,
+                        &obligation_reservers_to_refresh,
+                        &mut reserves,
+                        &mut lending_market,
+                        &clock,
+                        Some(&mut scope_price_accounts),
+                        Some(&mut switchboard_accounts),
+                        Some(&HashMap::from([(pubkey, data)]))).await;
+
+                    //scan obligations
+                    let _ = scan_obligations(klend_client,
+                        &mut obligation_map,
+                        &mut obligation_reservers_to_refresh,
+                        &clock,
+                        liquidatable_obligations,
+                        reserves,
+                        lending_market,
+                        rts).await;
+
+                    let duration = start.elapsed();
+                    log::info!("Scan {} obligations, time used: {:?} s", liquidatable_obligations.len(), duration);
+
                 }
             }
-            Err(anyhow::Error::msg("Account Update error").into())
+        } else {
+            log::info!("Account Update error: {:?}", message);
+            break;
         }
-    }).await
+    }
+
+    Ok(())
 }

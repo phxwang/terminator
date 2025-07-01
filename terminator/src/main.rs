@@ -10,6 +10,7 @@ use solana_sdk::{
     signer::Signer,
     clock::Clock,
     compute_budget,
+    account::Account,
 };
 use tokio::time::sleep;
 use tracing::{info, warn, debug, error};
@@ -819,38 +820,10 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
 async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, obligation_map: &mut HashMap<Pubkey, Obligation>, market_accounts_map: &mut HashMap<Pubkey, (HashMap<Pubkey, Reserve>, LendingMarket, HashMap<Pubkey, ReferrerTokenState>)>) -> Result<()> {
     let start = std::time::Instant::now();
 
-    // load hashmap from scope.json file, need to check if the file exists
-    let file_path = format!("{}.json", scope);
-    if !Path::new(&file_path).exists() {
-        info!("[Liquidation Thread] File {} does not exist", file_path);
-        sleep(Duration::from_secs(5)).await;
-        return Ok(());
-    }
-
-    let file = match File::open(&file_path) {
-        Ok(file) => file,
-        Err(e) => {
-            error!("[Liquidation Thread] Error opening file {}: {}", file_path, e);
-            sleep(Duration::from_secs(5)).await;
-            return Ok(());
-        }
+    let obligations_map = match load_obligations_map(scope).await {
+        Ok(value) => value,
+        Err(value) => return value,
     };
-
-    let obligations_map: HashMap<String, Vec<String>> = match serde_json::from_reader(file) {
-        Ok(obligations_map) => {
-            obligations_map
-        }
-        Err(e) => {
-            error!("[Liquidation Thread] Error loading obligations map: {}", e);
-            return Err(e.into());
-        }
-    };
-
-    if obligations_map.is_empty() {
-        info!("[Liquidation Thread] No liquidatable obligations found");
-        sleep(Duration::from_secs(5)).await;
-        return Ok(());
-    }
 
     let mut total_liquidatable_obligations = 0;
 
@@ -900,7 +873,10 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
             &obligation_reservers_to_refresh,
             reserves,
             lending_market,
-            &clock).await {
+            &clock,
+            None,
+            None,
+            None).await {
             Ok(_) => (),
             Err(e) => {
                 error!("[Liquidation Thread] Error refreshing market {}: {}", market_pubkey, e);
@@ -910,46 +886,89 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
         let refresh_en = refresh_start.elapsed().as_secs_f64();
         debug!("[Liquidation Thread] Refreshed market {} in {}s", market_pubkey.to_string().green(), refresh_en);
 
-        for address_str in liquidatable_obligations.iter() {
-            let address = match Pubkey::from_str(address_str) {
-                Ok(pubkey) => pubkey,
-                Err(e) => {
-                    error!("[Liquidation Thread] Invalid obligation address {}: {}", address_str, e);
-                    continue;
-                }
-            };
-
-            let start = std::time::Instant::now();
-
-            if let Some(obligation) = obligation_map.get(&address) {
-                if let Err(e) = check_and_liquidate(klend_client, &address, *obligation, &lending_market, &clock, &reserves, &rts).await {
-                    error!("[Liquidation Thread] Error checking/liquidating obligation {}: {}", address, e);
-                }
-            } else {
-                match klend_client.fetch_obligation(&address).await {
-                    Ok(obligation) => {
-                        obligation_map.insert(address, obligation);
-                        obligation_reservers_to_refresh.extend(obligation.deposits.iter().map(|coll| coll.deposit_reserve));
-                        obligation_reservers_to_refresh.extend(obligation.borrows.iter().map(|borrow| borrow.borrow_reserve));
-                        if let Err(e) = check_and_liquidate(klend_client, &address, obligation, &lending_market, &clock, &reserves, &rts).await {
-                            error!("[Liquidation Thread] Error checking/liquidating obligation {}: {}", address, e);
-                        }
-                    }
-                    Err(e) => {
-                        error!("[Liquidation Thread] Error fetching obligation {}: {}", address, e);
-                        continue;
-                    }
-                }
-            }
-
-            let en = start.elapsed().as_secs_f64();
-            debug!("[Liquidation Thread] Processed obligation time used: {} in {}s", address.to_string().green(), en);
-        }
+        scan_obligations(klend_client, obligation_map, &mut obligation_reservers_to_refresh, &clock, liquidatable_obligations, reserves, lending_market, rts).await;
     }
     let en = start.elapsed().as_secs_f64();
     info!("[Liquidation Thread] Scanned {} obligations in {}s", total_liquidatable_obligations, en);
 
     Ok(())
+}
+
+async fn scan_obligations(
+    klend_client: &Arc<KlendClient>,
+    obligation_map: &mut HashMap<Pubkey, Obligation>,
+    obligation_reservers_to_refresh: &mut Vec<Pubkey>,
+    clock: &Clock, liquidatable_obligations: &Vec<String>,
+    reserves: &HashMap<Pubkey, Reserve>,
+    lending_market: &LendingMarket,
+    rts: &HashMap<Pubkey, ReferrerTokenState>) {
+    for address_str in liquidatable_obligations.iter() {
+        let address = match Pubkey::from_str(address_str) {
+            Ok(pubkey) => pubkey,
+            Err(e) => {
+                error!("[Liquidation Thread] Invalid obligation address {}: {}", address_str, e);
+                continue;
+            }
+        };
+
+        let start = std::time::Instant::now();
+
+        if let Some(obligation) = obligation_map.get(&address) {
+            if let Err(e) = check_and_liquidate(klend_client, &address, *obligation, &lending_market, clock, &reserves, &rts).await {
+                error!("[Liquidation Thread] Error checking/liquidating obligation {}: {}", address, e);
+            }
+        } else {
+            match klend_client.fetch_obligation(&address).await {
+                Ok(obligation) => {
+                    obligation_map.insert(address, obligation);
+                    obligation_reservers_to_refresh.extend(obligation.deposits.iter().map(|coll| coll.deposit_reserve));
+                    obligation_reservers_to_refresh.extend(obligation.borrows.iter().map(|borrow| borrow.borrow_reserve));
+                    if let Err(e) = check_and_liquidate(klend_client, &address, obligation, &lending_market, clock, &reserves, &rts).await {
+                        error!("[Liquidation Thread] Error checking/liquidating obligation {}: {}", address, e);
+                    }
+                }
+                Err(e) => {
+                    error!("[Liquidation Thread] Error fetching obligation {}: {}", address, e);
+                    continue;
+                }
+            }
+        }
+
+        let en = start.elapsed().as_secs_f64();
+        debug!("[Liquidation Thread] Processed obligation time used: {} in {}s", address.to_string().green(), en);
+    }
+}
+
+async fn load_obligations_map(scope: String) -> Result<HashMap<String, Vec<String>>, std::result::Result<(), anyhow::Error>> {
+    let file_path = format!("{}.json", scope);
+    if !Path::new(&file_path).exists() {
+        info!("[Liquidation Thread] File {} does not exist", file_path);
+        sleep(Duration::from_secs(5)).await;
+        return Err(Ok(()));
+    }
+    let file = match File::open(&file_path) {
+        Ok(file) => file,
+        Err(e) => {
+            error!("[Liquidation Thread] Error opening file {}: {}", file_path, e);
+            sleep(Duration::from_secs(5)).await;
+            return Err(Ok(()));
+        }
+    };
+    let obligations_map: HashMap<String, Vec<String>> = match serde_json::from_reader(file) {
+        Ok(obligations_map) => {
+            obligations_map
+        }
+        Err(e) => {
+            error!("[Liquidation Thread] Error loading obligations map: {}", e);
+            return Err(Err(e.into()));
+        }
+    };
+    if obligations_map.is_empty() {
+        info!("[Liquidation Thread] No liquidatable obligations found");
+        sleep(Duration::from_secs(5)).await;
+        return Err(Ok(()));
+    }
+    Ok(obligations_map)
 }
 
 async fn loop_liquidate(klend_client: &Arc<KlendClient>, scope: String) -> Result<()> {
@@ -964,8 +983,72 @@ async fn loop_liquidate(klend_client: &Arc<KlendClient>, scope: String) -> Resul
     }
 }
 
-async fn stream_liquidate(_klend_client: &Arc<KlendClient>, _scope: String) -> Result<()> {
-    let _ = account_update_ws(None).await;
+async fn stream_liquidate(klend_client: &Arc<KlendClient>, scope: String) -> Result<()> {
+    let obligations_map = match load_obligations_map(scope).await {
+        Ok(value) => value,
+        Err(value) => return value,
+    };
+
+    for (market, liquidatable_obligations) in obligations_map.iter() {
+        let market_pubkey = match Pubkey::from_str(market) {
+            Ok(pubkey) => pubkey,
+            Err(e) => {
+                error!("[Liquidation Thread] Invalid market pubkey {}: {}", market, e);
+                continue;
+            }
+        };
+
+        let (market_accounts, rts) = match load_market_accounts_and_rts(klend_client, &market_pubkey).await {
+            Ok(result) => result,
+            Err(e) => {
+                error!("[Liquidation Thread] Error loading market accounts and rts {}: {}", market_pubkey, e);
+                continue;
+            }
+        };
+
+        /*let clock = sysvars::clock(&klend_client.client.client).await;
+
+        let mut reserves = market_accounts.reserves;
+        let mut lending_market = market_accounts.lending_market;
+
+        match refresh_market(klend_client, &market_pubkey, &vec![], &mut reserves, &mut lending_market, &clock).await {
+            Ok(_) => (),
+            Err(e) => {
+                error!("[Liquidation Thread] Error refreshing market {}: {}", market_pubkey, e);
+                continue;
+            }
+        };*/
+
+        //info!("market_accounts.reserves: {:?}", market_accounts.reserves);
+
+        let OracleAccounts {
+            pyth_accounts: _pyth_accounts,
+            mut switchboard_accounts,
+            mut scope_price_accounts,
+        } = match oracle_accounts(&klend_client.local_client, &market_accounts.reserves).await {
+            Ok(accounts) => accounts,
+            Err(e) => {
+                error!("Error getting oracle accounts: {}", e);
+                continue;
+            }
+        };
+
+        let mut reserves = market_accounts.reserves;
+        let mut lending_market = market_accounts.lending_market;
+
+        let _ = account_update_ws(
+            klend_client,
+            &market_pubkey,
+            &liquidatable_obligations,
+            &mut scope_price_accounts,
+            &mut switchboard_accounts,
+            &mut reserves,
+            &mut lending_market,
+            &rts
+        ).await;
+
+        break;
+    }
     Ok(())
 }
 
@@ -1058,7 +1141,7 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
             let mut lending_market = market_accounts.lending_market;
             let clock = sysvars::clock(&klend_client.client.client).await;
 
-            match refresh_market(klend_client, market, &vec![], &mut reserves, &mut lending_market, &clock).await {
+            match refresh_market(klend_client, market, &vec![], &mut reserves, &mut lending_market, &clock, None, None, None).await {
                 Ok(_) => (),
                 Err(e) => {
                     error!("Error refreshing market {}: {}", market, e);
@@ -1232,7 +1315,10 @@ async fn load_market_accounts_and_rts(klend_client: &Arc<KlendClient>, market: &
 }
 
 async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  obligation_reservers_to_refresh: &Vec<Pubkey>,
-    reserves: &mut HashMap<Pubkey, Reserve>, lending_market: &mut LendingMarket, clock: &Clock)
+    reserves: &mut HashMap<Pubkey, Reserve>, lending_market: &mut LendingMarket, clock: &Clock,
+    mut scope_price_accounts: Option<&mut Vec<(Pubkey, bool, Account)>>,
+    switchboard_accounts: Option<&mut Vec<(Pubkey, bool, Account)>>,
+    updated_scope_account_data: Option<&HashMap<Pubkey, Vec<u8>>>)
 -> Result<()> {
     let start = std::time::Instant::now();
     //let market_accs = klend_client.fetch_market_and_reserves(market).await?;
@@ -1251,24 +1337,44 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
     //let en_rts = start.elapsed().as_secs_f64();
     //info!("Refreshing market referrer token states {} time used: {}s", market.to_string().green(), en_rts);
 
-    let OracleAccounts {
-        mut pyth_accounts,
-        mut switchboard_accounts,
-        mut scope_price_accounts,
-    } = match oracle_accounts(&klend_client.local_client, &reserves).await {
-        Ok(accounts) => accounts,
-        Err(e) => {
-            error!("Error getting oracle accounts: {}", e);
-            return Err(e.into());
+    let (mut pyth_accounts, mut switchboard_accounts, mut scope_price_accounts_vec) = match updated_scope_account_data {
+        Some(updated_account_data) => {
+            // Update existing scope price accounts with new data
+            if let Some(ref mut accounts) = scope_price_accounts {
+                for (key, data) in updated_account_data.iter() {
+                    if let Some(scope_price_account) = accounts.iter_mut().find(|(k, _, _)| *k == *key) {
+                        scope_price_account.2.data = data.clone();
+                    }
+                }
+                (Vec::new(), switchboard_accounts.unwrap().clone(), accounts.clone())
+            } else {
+                return Err(anyhow::anyhow!("scope_price_accounts parameter is required when updated_scope_account_data is provided"));
+            }
+        }
+        None => {
+            let OracleAccounts {
+                pyth_accounts,
+                switchboard_accounts,
+                scope_price_accounts: scope_accounts,
+            } = match oracle_accounts(&klend_client.local_client, &reserves).await {
+                Ok(accounts) => accounts,
+                Err(e) => {
+                    error!("Error getting oracle accounts: {}", e);
+                    return Err(e.into());
+                }
+            };
+
+            (pyth_accounts, switchboard_accounts, scope_accounts)
         }
     };
+
 
     let en_oracle_accounts = start.elapsed().as_secs_f64();
     debug!("Refreshing market oracle accounts {} time used: {}s", market.to_string().green(), en_oracle_accounts);
 
     let pyth_account_infos = map_accounts_and_create_infos(&mut pyth_accounts);
     let switchboard_feed_infos = map_accounts_and_create_infos(&mut switchboard_accounts);
-    let scope_price_infos = map_accounts_and_create_infos(&mut scope_price_accounts);
+    let scope_price_infos = map_accounts_and_create_infos(&mut scope_price_accounts_vec);
 
     let refresh_set: HashSet<&Pubkey> = obligation_reservers_to_refresh.iter().collect();
     if !refresh_set.is_empty() {
@@ -1327,6 +1433,14 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
                 &switchboard_feed_infos,
                 &scope_price_infos,
             )?;
+
+            /*for reserve in reserves.values() {
+                info!("reserve: {:?} {:?} {:?} {:?}",
+                reserve.config.token_info.symbol(),
+                Fraction::from_bits(reserve.liquidity.market_price_sf),
+                reserve.liquidity.market_price_last_updated_ts,
+                reserve.last_update.get_price_status());
+            }*/
         }
     }
 
