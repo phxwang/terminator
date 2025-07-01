@@ -77,7 +77,7 @@ async fn get_token_program_id(client: &RpcClient, mint: &Pubkey) -> Result<Pubke
     } else if mint_account.owner == Token::id() {
         Ok(Token::id())
     } else {
-        Err(anyhow!("Unknown token program for mint {}: {}", mint, mint_account.owner))
+        Ok(Token::id())
     }
 }
 
