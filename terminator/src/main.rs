@@ -176,6 +176,13 @@ pub enum Actions {
         #[clap(flatten)]
         rebalance_args: RebalanceArgs,
     },
+    #[clap()]
+    StreamLiquidate {
+        #[clap(long, env, parse(try_from_str))]
+        scope: String,
+        #[clap(flatten)]
+        rebalance_args: RebalanceArgs,
+    },
 }
 
 #[tokio::main]
@@ -258,6 +265,7 @@ async fn main() -> Result<()> {
             rebalance_args: _,
         } => swap::swap_action(&klend_client, from, to, amount, slippage_pct).await,
         Actions::LoopLiquidate { scope, rebalance_args: _ } => loop_liquidate(&klend_client, scope).await,
+        Actions::StreamLiquidate { scope, rebalance_args: _ } => stream_liquidate(&klend_client, scope).await,
     }
 }
 
@@ -953,6 +961,10 @@ async fn loop_liquidate(klend_client: &Arc<KlendClient>, scope: String) -> Resul
             error!("[Liquidation Thread] Error: {}", e);
         }
     }
+}
+
+async fn stream_liquidate(klend_client: &Arc<KlendClient>, scope: String) -> Result<()> {
+    Ok(())
 }
 
 async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey>) -> Result<()> {
