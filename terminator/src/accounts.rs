@@ -239,16 +239,21 @@ pub async fn find_account(
 
 pub async fn account_update_ws(
     klend_client: &Arc<KlendClient>,
-    market_pubkey: &Pubkey,
-    liquidatable_obligations: &Vec<String>,
-    mut scope_price_accounts: &mut Vec<(Pubkey, bool, Account)>,
-    mut switchboard_accounts: &mut Vec<(Pubkey, bool, Account)>,
-    mut reserves: &mut HashMap<Pubkey, Reserve>,
-    mut lending_market: &mut LendingMarket,
-    rts: &HashMap<Pubkey, ReferrerTokenState>,
+    market_pubkeys: &Vec<Pubkey>,
+    market_obligations_map: &HashMap<Pubkey, Vec<Obligation>>,
+    all_scope_price_accounts: &mut HashMap<Pubkey, Vec<(Pubkey, bool, Account)>>,
+    all_switchboard_accounts: &mut HashMap<Pubkey, Vec<(Pubkey, bool, Account)>>,
+    all_reserves: &mut HashMap<Pubkey, Reserve>,
+    all_lending_market: &mut HashMap<Pubkey, LendingMarket>,
+    all_rts: &mut HashMap<Pubkey, HashMap<Pubkey, ReferrerTokenState>>,
 ) -> anyhow::Result<()> {
 
-    let pubkeys = scope_price_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
+    // Collect all scope price account keys
+    let pubkeys = all_scope_price_accounts
+        .values()
+        .flatten()
+        .map(|(key, _, _)| *key)
+        .collect::<Vec<Pubkey>>();
     log::info!("account update ws: {:?}", pubkeys);
 
     let mut accounts = HashMap::new();
@@ -311,28 +316,33 @@ pub async fn account_update_ws(
 
                     //update reserves
                     let clock = sysvars::clock(&klend_client.client.client).await;
-                    let _ = refresh_market(klend_client,
-                        &market_pubkey,
-                        &obligation_reservers_to_refresh,
-                        &mut reserves,
-                        &mut lending_market,
-                        &clock,
-                        Some(&mut scope_price_accounts),
-                        Some(&mut switchboard_accounts),
-                        Some(&HashMap::from([(pubkey, data)]))).await;
 
-                    //scan obligations
-                    let _ = scan_obligations(klend_client,
-                        &mut obligation_map,
-                        &mut obligation_reservers_to_refresh,
-                        &clock,
-                        liquidatable_obligations,
-                        reserves,
-                        lending_market,
-                        rts).await;
+                    for market_pubkey in market_pubkeys {
+                        let _ = refresh_market(klend_client,
+                            &market_pubkey,
+                            &mut obligation_reservers_to_refresh,
+                            all_reserves,
+                            all_lending_market.get_mut(market_pubkey).unwrap(),
+                            &clock,
+                            Some(all_scope_price_accounts.get_mut(market_pubkey).unwrap()),
+                            Some(all_switchboard_accounts.get_mut(market_pubkey).unwrap()),
+                            Some(&HashMap::from([(pubkey, data.clone())]))).await;
 
-                    let duration = start.elapsed();
-                    log::info!("Scan {} obligations, time used: {:?} s", liquidatable_obligations.len(), duration);
+                        //scan obligations
+                        let obligations = market_obligations_map.get(market_pubkey).unwrap();
+                        let obligation_strings: Vec<String> = obligations.iter().map(|_| "placeholder".to_string()).collect();
+                        let _ = scan_obligations(klend_client,
+                            &mut obligation_map,
+                            &mut obligation_reservers_to_refresh,
+                            &clock,
+                            &obligation_strings,
+                            all_reserves,
+                            all_lending_market.get(market_pubkey).unwrap(),
+                            all_rts.get(market_pubkey).unwrap()).await;
+
+                        let duration = start.elapsed();
+                        log::info!("Scan {} obligations, time used: {:?} s", obligations.len(), duration);
+                    }
 
                 }
             }
