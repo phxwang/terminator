@@ -18,11 +18,11 @@ use solana_sdk::instruction::Instruction;
 use solana_sdk::address_lookup_table::AddressLookupTableAccount;
 
 use crate::{
-    accounts::{map_accounts_and_create_infos, oracle_accounts, OracleAccounts, MarketAccounts},
-    client::{KlendClient, RebalanceConfig},
+    accounts::{map_accounts_and_create_infos, oracle_accounts, OracleAccounts, MarketAccounts, account_update_ws},
+    client::KlendClient,
     config::get_lending_markets,
     jupiter::get_best_swap_instructions,
-    liquidator::{Holding, Holdings, Liquidator},
+    liquidator::{Holdings, Liquidator},
     model::StateWithKey,
     operations::{
         obligation_reserves, referrer_token_states_of_obligation, split_obligations,
@@ -48,6 +48,7 @@ pub mod operations;
 mod px;
 pub mod sysvars;
 mod utils;
+pub mod yellowstone_transaction;
 
 const USDC_MINT_STR: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
@@ -963,7 +964,8 @@ async fn loop_liquidate(klend_client: &Arc<KlendClient>, scope: String) -> Resul
     }
 }
 
-async fn stream_liquidate(klend_client: &Arc<KlendClient>, scope: String) -> Result<()> {
+async fn stream_liquidate(_klend_client: &Arc<KlendClient>, _scope: String) -> Result<()> {
+    let _ = account_update_ws(None).await;
     Ok(())
 }
 

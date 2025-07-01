@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use anchor_client::{
     solana_client::{
@@ -10,14 +11,20 @@ use anchor_client::{
 use anchor_lang::Id;
 use anchor_spl::token::Token;
 use anyhow::Result;
+use backoff::{backoff::Constant, future::retry};
+use futures::SinkExt;
+use futures_util::stream::StreamExt;
 use kamino_lending::{LendingMarket, Reserve};
+use log;
 use orbit_link::{async_client::AsyncClient, OrbitLink};
 use spl_associated_token_account::instruction::create_associated_token_account;
 use tracing::info;
+use yellowstone_grpc_proto::prelude::{SubscribeRequest, SubscribeRequestFilterAccounts, subscribe_update::UpdateOneof};
 
 use crate::{
     client::{rpc, KlendClient},
     consts::WRAPPED_SOL_MINT,
+    yellowstone_transaction::create_yellowstone_client,
 };
 
 pub fn create_is_signer_account_infos<'a>(
@@ -219,4 +226,94 @@ pub async fn find_account(
         println!("Ata not found: {}", address);
         Ok(None)
     }
+}
+
+pub async fn account_update_ws(pubkey: Option<Pubkey>) -> anyhow::Result<()> {
+    log::info!("account_update_ws");
+    let mut accounts = HashMap::new();
+    let account_filter = match pubkey {
+        Some(key) => vec![key.to_string()],
+        None => vec![],
+    };
+    accounts.insert(
+        "client".to_string(),
+        SubscribeRequestFilterAccounts {
+            account: account_filter,
+            owner: vec![],
+            filters: vec![],
+        },
+    );
+    // let x_token = None;
+    retry(Constant::new(Duration::from_secs(1)), move || {
+        let accounts = accounts.clone();
+        let endpoint = "ws://198.244.253.218:10000".to_string();
+        let x_token = None;
+        //let orderbook_ladder = self.orderbook_ladder.clone();
+
+        async move {
+            let mut client = create_yellowstone_client(&endpoint, &x_token, 10).await?;
+            let (mut subscribe_tx, mut stream) = client.subscribe().await.map_err(|e| {
+                anyhow::Error::msg(format!(
+                    "Failed to subscribe: {} ({})",
+                    endpoint, e
+                ))
+            })?;
+            log::info!("Connected to the gRPC server");
+            subscribe_tx
+                .send(SubscribeRequest {
+                    slots: HashMap::new(),
+                    accounts,
+                    transactions: HashMap::new(),
+                    blocks: HashMap::new(),
+                    blocks_meta: HashMap::new(),
+                    commitment: None,
+                    accounts_data_slice: vec![],
+                    transactions_status: HashMap::new(),
+                    ping: None,
+                    entry: HashMap::new(),
+                })
+                .await
+                .map_err(|e| {
+                    anyhow::Error::msg(format!(
+                        "Failed to send: {} ({})",
+                        endpoint, e
+                    ))
+                })?;
+            while let Some(message) = stream.next().await {
+                if let Ok(msg) = message {
+                    if let Some(UpdateOneof::Account(account)) = msg.update_oneof {
+                        // let slot = account.slot;
+                        let account = account.account;
+
+                        if let Some(_account) = account {
+
+                            //let (header_bytes, market_bytes) = account.data.split_at(size_of::<MarketHeader>());
+                            //let header = bytemuck::try_from_bytes::<MarketHeader>(header_bytes).unwrap();
+                            //let market = load_with_dispatch(&header.market_size_params, market_bytes)
+                            //    .unwrap()
+                            //    .inner;
+                            //let state = market.get_trader_state(&pubkey);
+                            //if let Some(state) = state {
+                                //log::info!("Account state: {:?}", state);
+                                //let base_qty = meta.base_lots_to_base_atoms(state.base_lots_free.as_u64()) as f64 / meta.base_atoms_per_raw_base_unit as f64;
+                                //let quote_qty = meta.quote_lots_to_quote_atoms(state.quote_lots_free.as_u64()) as f64 / meta.quote_atoms_per_quote_unit as f64;
+                                //let base_locked_qty = meta.base_lots_to_base_atoms(state.base_lots_locked.as_u64()) as f64 / meta.base_atoms_per_raw_base_unit as f64;
+                                //let quote_locked_qty = meta.quote_lots_to_quote_atoms(state.quote_lots_locked.as_u64()) as f64 / meta.quote_atoms_per_quote_unit as f64;
+
+                                //log::info!("Base: {}, Quote: {}, Base Locked: {}, Quote Locked {}", base_qty, quote_qty, base_locked_qty, quote_locked_qty);
+                            //}
+                            // update order book
+                            //let ladder = Orderbook::from_ladder(&market.get_ladder(5), &meta);
+                            //log::info!("{:#?}", ladder);
+                            //*orderbook_ladder.write().await = Some(ladder);
+                        }
+                    }
+                } else {
+                    log::info!("Account Update error: {:?}", message);
+                    break;
+                }
+            }
+            Err(anyhow::Error::msg("Account Update error").into())
+        }
+    }).await
 }
