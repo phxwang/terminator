@@ -990,16 +990,16 @@ async fn stream_liquidate(klend_client: &Arc<KlendClient>, scope: String) -> Res
     };
 
     let mut market_pubkeys = Vec::new();
-    let mut all_scope_price_accounts: HashMap<Pubkey, Vec<(Pubkey, bool, Account)>> = HashMap::new();
-    let mut all_switchboard_accounts: HashMap<Pubkey, Vec<(Pubkey, bool, Account)>> = HashMap::new();
+    let mut all_scope_price_accounts: Vec<(Pubkey, bool, Account)> = Vec::new();
+    let mut all_switchboard_accounts: Vec<(Pubkey, bool, Account)> = Vec::new();
     let mut all_reserves: HashMap<Pubkey, Reserve> = HashMap::new();
     let mut all_lending_market: HashMap<Pubkey, LendingMarket> = HashMap::new();
     let mut all_rts: HashMap<Pubkey, HashMap<Pubkey, ReferrerTokenState>> = HashMap::new();
 
     // Convert obligations_map to the expected type
-    let mut market_obligations_map: HashMap<Pubkey, Vec<Obligation>> = HashMap::new();
+    let mut market_obligations_map: HashMap<Pubkey, Vec<String>> = HashMap::new();
 
-    for (market, _liquidatable_obligations) in obligations_map.iter() {
+    for (market, liquidatable_obligations) in obligations_map.iter() {
         let market_pubkey = match Pubkey::from_str(market) {
             Ok(pubkey) => pubkey,
             Err(e) => {
@@ -1029,20 +1029,21 @@ async fn stream_liquidate(klend_client: &Arc<KlendClient>, scope: String) -> Res
         };
 
         // For now, create empty obligation list - this should be populated with actual obligations if needed
-        market_obligations_map.insert(market_pubkey, Vec::new());
+        market_obligations_map.insert(market_pubkey, liquidatable_obligations.clone());
 
         market_pubkeys.push(market_pubkey);
-        all_scope_price_accounts.insert(market_pubkey, scope_price_accounts);
-        all_switchboard_accounts.insert(market_pubkey, switchboard_accounts);
+        all_scope_price_accounts.extend(scope_price_accounts);
+        all_switchboard_accounts.extend(switchboard_accounts);
 
         // Insert individual reserves instead of nested structure
-        for (reserve_key, reserve) in market_accounts.reserves {
-            all_reserves.insert(reserve_key, reserve);
-        }
+        all_reserves.extend(market_accounts.reserves);
 
         all_lending_market.insert(market_pubkey, market_accounts.lending_market);
         all_rts.insert(market_pubkey, rts);
     }
+
+    //println!("all_switchboard_accounts: {:?}", all_switchboard_accounts);
+    println!("all_reserves: {:?}", all_reserves.keys());
 
     let _ = account_update_ws(
         klend_client,
@@ -1352,7 +1353,11 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
                         scope_price_account.2.data = data.clone();
                     }
                 }
-                (Vec::new(), switchboard_accounts.unwrap().clone(), accounts.clone())
+
+                let switchboard_accounts_clone = switchboard_accounts.unwrap().clone();
+                println!("switchboard_accounts_clone: {:?}", switchboard_accounts_clone);
+
+                (Vec::new(), switchboard_accounts_clone, accounts.clone())
             } else {
                 return Err(anyhow::anyhow!("scope_price_accounts parameter is required when updated_scope_account_data is provided"));
             }

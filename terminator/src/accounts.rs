@@ -138,7 +138,7 @@ pub fn refresh_oracle_keys(reserves: &HashMap<Pubkey, Reserve>, all_oracle_keys:
         let sb_twap_key = reserve.config.token_info.switchboard_configuration.twap_aggregator;
         let scope_key = reserve.config.token_info.scope_configuration.price_feed;
 
-        info!("reserve: {:?}, pyth_key: {:?}, sb_price_key: {:?}, sb_twap_key: {:?}, scope_key: {:?}", reserve.config.token_info.name, pyth_key, sb_price_key, sb_twap_key, scope_key);
+        //info!("reserve: {:?}, pyth_key: {:?}, sb_price_key: {:?}, sb_twap_key: {:?}, scope_key: {:?}", reserve.config.token_info.name, pyth_key, sb_price_key, sb_twap_key, scope_key);
 
         pyth_keys.insert(pyth_key);
         switchboard_keys.insert(sb_price_key);
@@ -240,20 +240,16 @@ pub async fn find_account(
 pub async fn account_update_ws(
     klend_client: &Arc<KlendClient>,
     market_pubkeys: &Vec<Pubkey>,
-    market_obligations_map: &HashMap<Pubkey, Vec<Obligation>>,
-    all_scope_price_accounts: &mut HashMap<Pubkey, Vec<(Pubkey, bool, Account)>>,
-    all_switchboard_accounts: &mut HashMap<Pubkey, Vec<(Pubkey, bool, Account)>>,
+    market_obligations_map: &HashMap<Pubkey, Vec<String>>,
+    all_scope_price_accounts: &mut Vec<(Pubkey, bool, Account)>,
+    all_switchboard_accounts: &mut Vec<(Pubkey, bool, Account)>,
     all_reserves: &mut HashMap<Pubkey, Reserve>,
     all_lending_market: &mut HashMap<Pubkey, LendingMarket>,
     all_rts: &mut HashMap<Pubkey, HashMap<Pubkey, ReferrerTokenState>>,
 ) -> anyhow::Result<()> {
 
     // Collect all scope price account keys
-    let pubkeys = all_scope_price_accounts
-        .values()
-        .flatten()
-        .map(|(key, _, _)| *key)
-        .collect::<Vec<Pubkey>>();
+    let pubkeys = all_scope_price_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
     log::info!("account update ws: {:?}", pubkeys);
 
     let mut accounts = HashMap::new();
@@ -311,8 +307,8 @@ pub async fn account_update_ws(
                     let start = std::time::Instant::now();
                     let data = account.data;
                     let pubkey = Pubkey::try_from(account.pubkey.as_slice()).unwrap();
-                    let scope_prices = bytemuck::from_bytes::<ScopePrices>(&data[8..]);
-                    log::info!("Account: {:?}, scope_prices updated: {:?}", pubkey, scope_prices.prices.len());
+                    //let scope_prices = bytemuck::from_bytes::<ScopePrices>(&data[8..]);
+                    //log::info!("Account: {:?}, scope_prices updated: {:?}", pubkey, scope_prices.prices.len());
 
                     //update reserves
                     let clock = sysvars::clock(&klend_client.client.client).await;
@@ -320,22 +316,21 @@ pub async fn account_update_ws(
                     for market_pubkey in market_pubkeys {
                         let _ = refresh_market(klend_client,
                             &market_pubkey,
-                            &mut obligation_reservers_to_refresh,
+                            &Vec::new(),
                             all_reserves,
                             all_lending_market.get_mut(market_pubkey).unwrap(),
                             &clock,
-                            Some(all_scope_price_accounts.get_mut(market_pubkey).unwrap()),
-                            Some(all_switchboard_accounts.get_mut(market_pubkey).unwrap()),
+                            Some(all_scope_price_accounts),
+                            Some(all_switchboard_accounts),
                             Some(&HashMap::from([(pubkey, data.clone())]))).await;
 
                         //scan obligations
                         let obligations = market_obligations_map.get(market_pubkey).unwrap();
-                        let obligation_strings: Vec<String> = obligations.iter().map(|_| "placeholder".to_string()).collect();
                         let _ = scan_obligations(klend_client,
                             &mut obligation_map,
                             &mut obligation_reservers_to_refresh,
                             &clock,
-                            &obligation_strings,
+                            &obligations,
                             all_reserves,
                             all_lending_market.get(market_pubkey).unwrap(),
                             all_rts.get(market_pubkey).unwrap()).await;
