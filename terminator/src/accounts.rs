@@ -341,8 +341,8 @@ pub async fn account_update_ws(
                     let start = std::time::Instant::now();
                     let data = account.data;
                     let pubkey = Pubkey::try_from(account.pubkey.as_slice()).unwrap();
-                    let scope_prices = bytemuck::from_bytes::<ScopePrices>(&data[8..]);
-                    info!("Account: {:?}, scope_prices updated: {:?}", pubkey, scope_prices.prices.len());
+                    //let scope_prices = bytemuck::from_bytes::<ScopePrices>(&data[8..]);
+                    //info!("Account: {:?}, scope_prices updated: {:?}", pubkey, scope_prices.prices.len());
 
                     //update reserves
                     let clock = sysvars::clock(&klend_client.client.client).await;
@@ -352,31 +352,15 @@ pub async fn account_update_ws(
                     //    info!("Price age: {:?} second, price: value={}, exp={}", price_age_in_seconds, price.price.value, price.price.exp);
                     //}
 
-                    for reserve in all_reserves.values() {
-                        debug!("reserve: {:?}", reserve.config.token_info.scope_configuration.price_feed);
-                        if reserve.config.token_info.scope_configuration.price_feed == pubkey {
-                            if let Some(price) = get_price_usd(&scope_prices, reserve.config.token_info.scope_configuration.price_chain) {
-                                let price_age_in_seconds = clock.unix_timestamp.saturating_sub(price.timestamp as i64);
-                                info!("WebSocket update - reserve: {} price: {:?} age: {:?} seconds", reserve.config.token_info.symbol(), price, price_age_in_seconds);
-                            }
-                        }
-                    }
-
-
-                    // First, update the data in our local arrays directly
-                    if let Some(scope_price_account) = all_scope_price_accounts.iter_mut().find(|(k, _, _)| *k == pubkey) {
-                        let old_data_len = scope_price_account.2.data.len();
-                        scope_price_account.2.data = data.clone();
-                        info!("Direct update: scope_price_account: {:?} (data length: {} -> {})",
-                            scope_price_account.0.to_string(), old_data_len, data.len());
-                    }
-
-                    if let Some(switchboard_account) = all_switchboard_accounts.iter_mut().find(|(k, _, _)| *k == pubkey) {
-                        let old_data_len = switchboard_account.2.data.len();
-                        switchboard_account.2.data = data.clone();
-                        info!("Direct update: switchboard_account: {:?} (data length: {} -> {})",
-                            switchboard_account.0.to_string(), old_data_len, data.len());
-                    }
+                    //for reserve in all_reserves.values() {
+                    //   debug!("reserve: {:?}", reserve.config.token_info.scope_configuration.price_feed);
+                    //    if reserve.config.token_info.scope_configuration.price_feed == pubkey {
+                    //        if let Some(price) = get_price_usd(&scope_prices, reserve.config.token_info.scope_configuration.price_chain) {
+                    //            let price_age_in_seconds = clock.unix_timestamp.saturating_sub(price.timestamp as i64);
+                    //            info!("WebSocket update - reserve: {} price: {:?} age: {:?} seconds", reserve.config.token_info.symbol(), price, price_age_in_seconds);
+                    //        }
+                    //    }
+                    //}
 
                     for market_pubkey in market_pubkeys {
                         // Now call refresh_market without additional updated_account_data since we've already updated the arrays

@@ -1032,8 +1032,19 @@ async fn stream_liquidate(klend_client: &Arc<KlendClient>, scope: String) -> Res
         market_obligations_map.insert(market_pubkey, liquidatable_obligations.clone());
 
         market_pubkeys.push(market_pubkey);
-        all_scope_price_accounts.extend(scope_price_accounts);
-        all_switchboard_accounts.extend(switchboard_accounts);
+        // Deduplicate scope price accounts by pubkey
+        for account in scope_price_accounts {
+            if !all_scope_price_accounts.iter().any(|(key, _, _)| *key == account.0) {
+                all_scope_price_accounts.push(account);
+            }
+        }
+
+        // Deduplicate switchboard accounts by pubkey
+        for account in switchboard_accounts {
+            if !all_switchboard_accounts.iter().any(|(key, _, _)| *key == account.0) {
+                all_switchboard_accounts.push(account);
+            }
+        }
 
         // Insert individual reserves instead of nested structure
         all_reserves.extend(market_accounts.reserves);
@@ -1323,8 +1334,8 @@ async fn load_market_accounts_and_rts(klend_client: &Arc<KlendClient>, market: &
 
 async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  obligation_reservers_to_refresh: &Vec<Pubkey>,
     reserves: &mut HashMap<Pubkey, Reserve>, lending_market: &mut LendingMarket, clock: &Clock,
-    scope_price_accounts: Option<&mut Vec<(Pubkey, bool, Account)>>,
-    switchboard_accounts: Option<&mut Vec<(Pubkey, bool, Account)>>,
+    mut scope_price_accounts: Option<&mut Vec<(Pubkey, bool, Account)>>,
+    mut switchboard_accounts: Option<&mut Vec<(Pubkey, bool, Account)>>,
     updated_account_data: Option<&HashMap<Pubkey, Vec<u8>>>)
 -> Result<()> {
     let start = std::time::Instant::now();
@@ -1352,25 +1363,30 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
                 return Err(anyhow::anyhow!("oracle accounts parameters are required when updated_account_data is provided"));
             }
 
-            let mut updated_scope_accounts = scope_price_accounts.unwrap().clone();
-            let mut updated_switchboard_accounts = switchboard_accounts.unwrap().clone();
 
             // Update accounts with new data
-            //for (key, data) in updated_account_data.iter() {
-            //    if let Some(scope_price_account) = updated_scope_accounts.iter_mut().find(|(k, _, _)| *k == *key) {
-            //        let old_data_len = scope_price_account.2.data.len();
-            //        scope_price_account.2.data = data.clone();
-            //        info!("updated scope_price_account: {:?} (data length: {} -> {})",
-            //            scope_price_account.0.to_string(), old_data_len, data.len());
-            //    }
+            for (key, data) in updated_account_data.iter() {
+                if let Some(scope_accounts) = scope_price_accounts.as_mut() {
+                    if let Some(scope_price_account) = scope_accounts.iter_mut().find(|(k, _, _)| *k == *key) {
+                        let old_data_len = scope_price_account.2.data.len();
+                        scope_price_account.2.data = data.clone();
+                        debug!("updated scope_price_account: {:?} (data length: {} -> {})",
+                        scope_price_account.0.to_string(), old_data_len, data.len());
+                    }
+                }
+                if let Some(sb_accounts) = switchboard_accounts.as_mut() {
+                    if let Some(switchboard_account) = sb_accounts.iter_mut().find(|(k, _, _)| *k == *key) {
+                        let old_data_len = switchboard_account.2.data.len();
+                        switchboard_account.2.data = data.clone();
+                        debug!("updated switchboard_account: {:?} (data length: {} -> {})",
+                        switchboard_account.0.to_string(), old_data_len, data.len());
+                    }
+                }
+            }
 
-            //    if let Some(switchboard_account) = updated_switchboard_accounts.iter_mut().find(|(k, _, _)| *k == *key) {
-            //        let old_data_len = switchboard_account.2.data.len();
-            //        switchboard_account.2.data = data.clone();
-            //        info!("updated switchboard_account: {:?} (data length: {} -> {})",
-            //            switchboard_account.0.to_string(), old_data_len, data.len());
-            //    }
-            //}
+            let updated_scope_accounts = scope_price_accounts.map(|s| s.clone()).unwrap_or_default();
+            let updated_switchboard_accounts = switchboard_accounts.map(|s| s.clone()).unwrap_or_default();
+
 
             (Vec::new(), updated_switchboard_accounts, updated_scope_accounts)
         } else {
