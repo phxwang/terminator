@@ -16,9 +16,9 @@ use spl_token_2022::{
     state::{Account as Token2022Account, Mint as Token2022Mint},
     ID as TOKEN_2022_PROGRAM_ID,
 };
-use tracing::{debug, info, warn, error};
+use tracing::{info, warn, error};
 
-use crate::{accounts::find_account, client::KlendClient, config::get_lending_markets};
+use crate::{accounts::find_accounts, client::KlendClient, config::get_lending_markets};
 
 #[derive(Debug, Clone, Default)]
 pub struct Holdings {
@@ -69,16 +69,26 @@ fn label_of(mint: &Pubkey, reserves: &HashMap<Pubkey, Reserve>) -> String {
 }
 
 /// Determine if a mint uses Token2022 or SPL Token program
-async fn get_token_program_id(client: &RpcClient, mint: &Pubkey) -> Result<Pubkey> {
-    let mint_account = client.get_account(mint).await?;
+async fn get_token_program_ids(client: &RpcClient, mints: &Vec<Pubkey>) -> Result<HashMap<Pubkey, Pubkey>> {
 
-    if mint_account.owner == TOKEN_2022_PROGRAM_ID {
-        Ok(TOKEN_2022_PROGRAM_ID)
-    } else if mint_account.owner == Token::id() {
-        Ok(Token::id())
-    } else {
-        Ok(Token::id())
+    //分割成最多100个一组
+    let chunks = mints.chunks(100);
+    let mut token_program_ids = HashMap::new();
+    for chunk in chunks {
+        let mint_accounts = client.get_multiple_accounts(chunk).await?;
+        for (i, mint_account) in mint_accounts.iter().enumerate() {
+            if let Some(mint_account) = mint_account {
+                if mint_account.owner == TOKEN_2022_PROGRAM_ID {
+                    token_program_ids.insert(chunk[i], TOKEN_2022_PROGRAM_ID);
+                } else {
+                    token_program_ids.insert(chunk[i], Token::id());
+                }
+            } else {
+                warn!("Mint account not found for mint {}", chunk[i]);
+            }
+        }
     }
+    Ok(token_program_ids)
 }
 
 impl Liquidator {
@@ -101,30 +111,13 @@ impl Liquidator {
             .flat_map(|(_, r)| [r.liquidity.mint_pubkey, r.collateral.mint_pubkey])
             .collect();
         // Load wallet
-        let mut atas = HashMap::new();
+        let atas = HashMap::new();
         let wallet = match { client.client.payer().ok() } {
             Some(wallet) => {
                 // Load or create atas
                 info!("Loading atas...");
                 let wallet = Arc::new(wallet.insecure_clone());
-                let get_or_create_atas_futures = mints
-                    .iter()
-                    .map(|mint| get_or_create_ata(client, &wallet, mint));
-                let get_or_create_atas =
-                    futures::future::join_all(get_or_create_atas_futures).await;
-                for (i, ata_option) in get_or_create_atas.into_iter().enumerate() {
-                    if let Some(ata) = ata_option? {
-                        match mints.get(i) {
-                            Some(mint) => {
-                                atas.insert(*mint, ata);
-                            }
-                            None => {
-                                error!("Index {} out of bounds for mints vector", i);
-                                continue;
-                            }
-                        }
-                    }
-                }
+                let atas = get_or_create_atas(client, &wallet, &mints).await?;
                 info!(
                     "Loaded liquidator {} with {} tokens",
                     wallet.pubkey(),
@@ -212,69 +205,74 @@ impl Liquidator {
     }
 }
 
-async fn get_or_create_ata(
+async fn get_or_create_atas(
     client: &KlendClient,
     owner: &Arc<Keypair>,
-    mint: &Pubkey,
-) -> Result<Option<Pubkey>> {
+    mints: &[Pubkey],
+) -> Result<HashMap<Pubkey, Pubkey>> {
     let owner_pubkey = &owner.pubkey();
 
-    // Determine the correct token program for this mint
-    let token_program_id = match get_token_program_id(&client.client.client, mint).await {
-        Ok(program_id) => program_id,
+    // Determine the correct token program for these mints
+    let token_program_ids = match get_token_program_ids(&client.client.client, &mints.to_vec()).await {
+        Ok(token_program_ids) => token_program_ids,
         Err(e) => {
-            warn!("Failed to determine token program for mint {}: {}", mint, e);
-            warn!("Skipping ATA creation for mint {} due to unknown token program", mint);
-            //sleep for 5 seconds
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            return Ok(Some(Token::id()));
+            warn!("Failed to determine token program for mints: {}", e);
+            warn!("Skipping ATA creation due to unknown token program");
+            return Ok(HashMap::new());
         }
     };
 
     // Calculate ATA address using the correct token program
-    let ata =get_associated_token_address_with_program_id(owner_pubkey, mint, &token_program_id);
+    let mut atas = HashMap::new();
+    for (mint, token_program_id) in token_program_ids.iter() {
+        let ata = get_associated_token_address_with_program_id(owner_pubkey, mint, token_program_id);
+        atas.insert(*mint, ata);
+    }
 
-    if !matches!(find_account(&client.local_client.client, ata).await, Ok(None)) {
-        debug!("Liquidator ATA for mint {} exists: {}", mint, ata);
-        Ok(Some(ata))
-    } else {
-        info!(
-            "Liquidator ATA for mint {} does not exist, creating...",
-            mint
-        );
+    let ata_addresses: Vec<Pubkey> = atas.values().cloned().collect();
+    let accounts = find_accounts(&client.local_client.client, &ata_addresses).await?;
+    let mut existing_atas = HashMap::new();
 
-        info!("Creating ATA for mint {} using token program {}", mint, token_program_id);
-        let ix = create_associated_token_account(owner_pubkey, owner_pubkey, mint, &token_program_id);
-        let tx = match client
-            .client
-            .tx_builder()
-            .add_ix(ix)
-            .build(&[])
-            .await {
-                Ok(tx) => tx,
-                Err(e) => {
-                    warn!("Error building transaction for ATA creation: {}", e);
-                    return Ok(None);
+    for (mint, ata) in atas.iter() {
+        if accounts.get(ata).is_some() {
+            existing_atas.insert(*mint, *ata);
+        } else {
+            let token_program_id = token_program_ids.get(mint).unwrap();
+            info!("Creating ATA for mint {} using token program {} with address {}", mint, token_program_id, ata);
+
+            let ix = create_associated_token_account(owner_pubkey, owner_pubkey, mint, token_program_id);
+            let tx = match client
+                .client
+                .tx_builder()
+                .add_ix(ix)
+                .build(&[])
+                .await {
+                    Ok(tx) => tx,
+                    Err(e) => {
+                        warn!("Error building transaction for ATA creation: {}", e);
+                        continue;
+                    }
+                };
+
+            match client.send_and_confirm_transaction(tx).await {
+                Ok((sig, _)) => {
+                    info!(
+                        "Created ata for liquidator: {}, mint: {}, ata: {}, sig: {:?}",
+                        owner.pubkey(),
+                        mint,
+                        ata,
+                        sig
+                    );
+                    existing_atas.insert(*mint, *ata);
                 }
-            };
-
-        match client.send_and_confirm_transaction(tx).await {
-            Ok((sig, _)) => {
-                info!(
-                    "Created ata for liquidator: {}, mint: {}, ata: {}, sig: {:?}",
-                    owner.pubkey(),
-                    mint,
-                    ata,
-                    sig
-                );
-                Ok(Some(ata))
-            }
-            Err(e) => {
-                warn!("Error creating ata for liquidator: {}, mint: {}, ata: {}, program_id: {:?}, error: {:?}", owner.pubkey(), mint, ata, token_program_id, e);
-                Ok(None)
+                Err(e) => {
+                    warn!("Error creating ata for liquidator: {}, mint: {}, ata: {}, program_id: {:?}, error: {:?}", owner.pubkey(), mint, ata, token_program_id, e);
+                }
             }
         }
     }
+
+    Ok(existing_atas)
 }
 
 /// get the balance of a token account

@@ -265,8 +265,28 @@ pub async fn find_account(
         Ok(Some((address, account)))
     } else {
         println!("Ata not found: {}", address);
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         Ok(None)
     }
+}
+
+pub async fn find_accounts(
+    client: &RpcClient,
+    addresses: &Vec<Pubkey>,
+) -> Result<HashMap<Pubkey, Account>> {
+    let chunks = addresses.chunks(100);
+    let mut accounts = HashMap::new();
+    for chunk in chunks {
+        let res = client.get_multiple_accounts(chunk).await?;
+        for (i, account_opt) in res.iter().enumerate() {
+            if let Some(account) = account_opt {
+                accounts.insert(chunk[i], account.clone());
+            } else {
+                println!("Account not found: {}", chunk[i]);
+            }
+        }
+    }
+    Ok(accounts)
 }
 
 pub async fn account_update_ws(
