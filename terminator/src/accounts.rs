@@ -251,7 +251,7 @@ pub async fn account_update_ws(
     // Collect all scope price account keys
     let scope_price_pubkeys = all_scope_price_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
     let switchboard_pubkeys = all_switchboard_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
-    let pubkeys = [scope_price_pubkeys, switchboard_pubkeys].concat();
+    let pubkeys: Vec<Pubkey> = HashSet::<Pubkey>::from_iter([scope_price_pubkeys, switchboard_pubkeys].concat()).into_iter().collect();
     log::info!("account update ws: {:?}", pubkeys);
 
     let mut accounts = HashMap::new();
@@ -310,10 +310,15 @@ pub async fn account_update_ws(
                     let data = account.data;
                     let pubkey = Pubkey::try_from(account.pubkey.as_slice()).unwrap();
                     //let scope_prices = bytemuck::from_bytes::<ScopePrices>(&data[8..]);
-                    //log::info!("Account: {:?}, scope_prices updated: {:?}", pubkey, scope_prices.prices.len());
+                    //info!("Account: {:?}, scope_prices updated: {:?}", pubkey, scope_prices.prices.len());
 
                     //update reserves
                     let clock = sysvars::clock(&klend_client.client.client).await;
+
+                    //for price in scope_prices.prices {
+                    //    let price_age_in_seconds = clock.unix_timestamp.saturating_sub(price.unix_timestamp as i64);
+                    //    info!("Price age: {:?} second, price: value={}, exp={}", price_age_in_seconds, price.price.value, price.price.exp);
+                    //}
 
                     for market_pubkey in market_pubkeys {
                         let _ = refresh_market(klend_client,

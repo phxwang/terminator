@@ -1351,6 +1351,7 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
                 for (key, data) in updated_account_data.iter() {
                     if let Some(scope_price_account) = accounts.iter_mut().find(|(k, _, _)| *k == *key) {
                         scope_price_account.2.data = data.clone();
+                        info!("updated scope_price_account: {:?}", scope_price_account.0.to_string());
                     }
                 }
             } else {
@@ -1361,6 +1362,7 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
                 for (key, data) in updated_account_data.iter() {
                     if let Some(switchboard_account) = accounts.iter_mut().find(|(k, _, _)| *k == *key) {
                         switchboard_account.2.data = data.clone();
+                        info!("updated switchboard_account: {:?}", switchboard_account.0.to_string());
                     }
                 }
             } else {
@@ -1442,7 +1444,7 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
                 key,
             );
         } else {
-            operations::refresh_reserve(
+            match operations::refresh_reserve(
                 &key,
                 reserve,
                 &lending_market,
@@ -1450,7 +1452,14 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
                 &pyth_account_infos,
                 &switchboard_feed_infos,
                 &scope_price_infos,
-            )?;
+            ) {
+                Ok(_) => {
+                    info!("Refreshed reserve {} token {} with status {}", key.to_string().green(), reserve.config.token_info.symbol().purple(), reserve.config.status);
+                }
+                Err(e) => {
+                    error!("Error refreshing reserve {} token {} with status {}: {}", key.to_string().green(), reserve.config.token_info.symbol().purple(), reserve.config.status, e);
+                }
+            }
 
             /*for reserve in reserves.values() {
                 info!("reserve: {:?} {:?} {:?} {:?}",

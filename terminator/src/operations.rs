@@ -45,6 +45,7 @@ pub fn refresh_reserve<'a>(
             .switchboard_configuration
             .is_enabled()
         {
+            //println!("reserve {:?} with switchboard_price_oracle: {:?}", reserve.config.token_info.name, reserve.config.token_info.switchboard_configuration.price_aggregator);
             Some(
                 switchboard_feed_infos
                     .get(
