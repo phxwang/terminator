@@ -17,7 +17,7 @@ use kamino_lending::{LendingMarket, Reserve, Obligation, ReferrerTokenState};
 use scope::OraclePrices as ScopePrices;
 use orbit_link::{async_client::AsyncClient, OrbitLink};
 use spl_associated_token_account::instruction::create_associated_token_account;
-use tracing::info;
+use tracing::{info, debug};
 use yellowstone_grpc_proto::prelude::{SubscribeRequest, SubscribeRequestFilterAccounts, subscribe_update::UpdateOneof};
 use yellowstone_grpc_proto::geyser::CommitmentLevel;
 
@@ -353,17 +353,33 @@ pub async fn account_update_ws(
                     //}
 
                     for reserve in all_reserves.values() {
-                        info!("reserve: {:?}", reserve.config.token_info.scope_configuration.price_feed);
+                        debug!("reserve: {:?}", reserve.config.token_info.scope_configuration.price_feed);
                         if reserve.config.token_info.scope_configuration.price_feed == pubkey {
                             if let Some(price) = get_price_usd(&scope_prices, reserve.config.token_info.scope_configuration.price_chain) {
                                 let price_age_in_seconds = clock.unix_timestamp.saturating_sub(price.timestamp as i64);
-                                info!("reserve: {} price: {:?} age: {:?} seconds", reserve.config.token_info.symbol(), price, price_age_in_seconds);
+                                info!("WebSocket update - reserve: {} price: {:?} age: {:?} seconds", reserve.config.token_info.symbol(), price, price_age_in_seconds);
                             }
                         }
                     }
 
 
+                    // First, update the data in our local arrays directly
+                    if let Some(scope_price_account) = all_scope_price_accounts.iter_mut().find(|(k, _, _)| *k == pubkey) {
+                        let old_data_len = scope_price_account.2.data.len();
+                        scope_price_account.2.data = data.clone();
+                        info!("Direct update: scope_price_account: {:?} (data length: {} -> {})",
+                            scope_price_account.0.to_string(), old_data_len, data.len());
+                    }
+
+                    if let Some(switchboard_account) = all_switchboard_accounts.iter_mut().find(|(k, _, _)| *k == pubkey) {
+                        let old_data_len = switchboard_account.2.data.len();
+                        switchboard_account.2.data = data.clone();
+                        info!("Direct update: switchboard_account: {:?} (data length: {} -> {})",
+                            switchboard_account.0.to_string(), old_data_len, data.len());
+                    }
+
                     for market_pubkey in market_pubkeys {
+                        // Now call refresh_market without additional updated_account_data since we've already updated the arrays
                         let _ = refresh_market(klend_client,
                             &market_pubkey,
                             &Vec::new(),
@@ -372,7 +388,6 @@ pub async fn account_update_ws(
                             &clock,
                             Some(all_scope_price_accounts),
                             Some(all_switchboard_accounts),
-                            //Some(&HashMap::from([(pubkey, data.clone())]))
                             Some(&HashMap::from([(pubkey, data.clone())]))
                             ).await;
 

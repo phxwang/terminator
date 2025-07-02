@@ -1356,21 +1356,21 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
             let mut updated_switchboard_accounts = switchboard_accounts.unwrap().clone();
 
             // Update accounts with new data
-            for (key, data) in updated_account_data.iter() {
-                if let Some(scope_price_account) = updated_scope_accounts.iter_mut().find(|(k, _, _)| *k == *key) {
-                    let old_data_len = scope_price_account.2.data.len();
-                    scope_price_account.2.data = data.clone();
-                    info!("updated scope_price_account: {:?} (data length: {} -> {})",
-                        scope_price_account.0.to_string(), old_data_len, data.len());
-                }
+            //for (key, data) in updated_account_data.iter() {
+            //    if let Some(scope_price_account) = updated_scope_accounts.iter_mut().find(|(k, _, _)| *k == *key) {
+            //        let old_data_len = scope_price_account.2.data.len();
+            //        scope_price_account.2.data = data.clone();
+            //        info!("updated scope_price_account: {:?} (data length: {} -> {})",
+            //            scope_price_account.0.to_string(), old_data_len, data.len());
+            //    }
 
-                if let Some(switchboard_account) = updated_switchboard_accounts.iter_mut().find(|(k, _, _)| *k == *key) {
-                    let old_data_len = switchboard_account.2.data.len();
-                    switchboard_account.2.data = data.clone();
-                    info!("updated switchboard_account: {:?} (data length: {} -> {})",
-                        switchboard_account.0.to_string(), old_data_len, data.len());
-                }
-            }
+            //    if let Some(switchboard_account) = updated_switchboard_accounts.iter_mut().find(|(k, _, _)| *k == *key) {
+            //        let old_data_len = switchboard_account.2.data.len();
+            //        switchboard_account.2.data = data.clone();
+            //        info!("updated switchboard_account: {:?} (data length: {} -> {})",
+            //            switchboard_account.0.to_string(), old_data_len, data.len());
+            //    }
+            //}
 
             (Vec::new(), updated_switchboard_accounts, updated_scope_accounts)
         } else {
