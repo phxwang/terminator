@@ -118,6 +118,21 @@ impl KlendClient {
         Ok(obligation)
     }
 
+    pub async fn fetch_obligations_by_pubkey(&self, pubkeys: &[Pubkey]) -> Result<HashMap<Pubkey, Obligation>> {
+        info!("Fetching obligations: {:?}", pubkeys);
+        let obligations = self
+            .client
+            .get_anchor_accounts::<Obligation>(pubkeys)
+            .await?;
+        let mut obligations_map = HashMap::new();
+        for (i, pubkey) in pubkeys.iter().enumerate() {
+            if let Some(obligation) = obligations[i] {
+                obligations_map.insert(*pubkey, obligation);
+            }
+        }
+        Ok(obligations_map)
+    }
+
     pub async fn fetch_referrer_token_states(&self) -> Result<HashMap<Pubkey, ReferrerTokenState>> {
         let states = self
             .client

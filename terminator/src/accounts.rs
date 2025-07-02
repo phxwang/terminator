@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use anchor_client::{
     solana_client::{
@@ -17,9 +18,10 @@ use kamino_lending::{LendingMarket, Reserve, Obligation, ReferrerTokenState};
 //use scope::OraclePrices as ScopePrices;
 use orbit_link::{async_client::AsyncClient, OrbitLink};
 use spl_associated_token_account::instruction::create_associated_token_account;
-use tracing::{info};
+use tracing::{info, debug, error};
 use yellowstone_grpc_proto::prelude::{SubscribeRequest, SubscribeRequestFilterAccounts, subscribe_update::UpdateOneof};
 use yellowstone_grpc_proto::geyser::CommitmentLevel;
+use tokio::time::interval;
 
 use crate::{
     client::{rpc, KlendClient},
@@ -307,8 +309,42 @@ pub async fn account_update_ws(
     info!("account update ws: {:?}", pubkeys);
 
     let mut accounts = HashMap::new();
-    let mut obligation_map: HashMap<Pubkey, Obligation> = HashMap::new();
+    let obligation_map: Arc<RwLock<HashMap<Pubkey, Obligation>>> = Arc::new(RwLock::new(HashMap::new()));
     let mut obligation_reservers_to_refresh: Vec<Pubkey> = vec![];
+
+    // Create a thread to refresh obligation_map every 10 minutes
+    let obligation_map_clone = Arc::clone(&obligation_map);
+    let klend_client_clone = Arc::clone(klend_client);
+    //let _market_obligations_map_clone = market_obligations_map.clone();
+    tokio::spawn(async move {
+        let mut interval = interval(Duration::from_secs(600)); // 10 minutes
+        loop {
+            interval.tick().await;
+            debug!("Starting obligation map refresh cycle");
+
+            let obligation_keys: Vec<Pubkey> = {
+                let map = obligation_map_clone.read().unwrap();
+                map.keys().cloned().collect()
+            };
+
+            if obligation_keys.is_empty() {
+                debug!("No obligations to refresh");
+                continue;
+            }
+
+            match klend_client_clone.fetch_obligations_by_pubkey(&obligation_keys).await {
+                Ok(obligations) => {
+                    for (pubkey, obligation) in obligations {
+                        obligation_map_clone.write().unwrap().insert(pubkey, obligation);
+                    }
+                    info!("Completed obligation map refresh cycle for {} obligations", obligation_keys.len());
+                }
+                Err(e) => {
+                    error!("Failed to fetch obligations: {}", e);
+                }
+            }
+        }
+    });
     let account_filter = pubkeys.iter().map(|key| key.to_string()).collect::<Vec<String>>();
     accounts.insert(
         "client".to_string(),
@@ -397,14 +433,17 @@ pub async fn account_update_ws(
 
                         //scan obligations
                         let obligations = market_obligations_map.get(market_pubkey).unwrap();
-                        let _ = scan_obligations(klend_client,
-                            &mut obligation_map,
-                            &mut obligation_reservers_to_refresh,
-                            &clock,
-                            &obligations,
-                            all_reserves,
-                            all_lending_market.get(market_pubkey).unwrap(),
-                            all_rts.get(market_pubkey).unwrap()).await;
+                        {
+                            let mut obligation_map_write = obligation_map.write().unwrap();
+                            let _ = scan_obligations(klend_client,
+                                &mut obligation_map_write,
+                                &mut obligation_reservers_to_refresh,
+                                &clock,
+                                &obligations,
+                                all_reserves,
+                                all_lending_market.get(market_pubkey).unwrap(),
+                                all_rts.get(market_pubkey).unwrap()).await;
+                        }
 
                         let duration = start.elapsed();
                         info!("Scan {} obligations, time used: {:?} s", obligations.len(), duration);
