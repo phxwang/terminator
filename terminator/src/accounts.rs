@@ -329,7 +329,9 @@ pub async fn account_update_ws(
                             &clock,
                             Some(all_scope_price_accounts),
                             Some(all_switchboard_accounts),
-                            Some(&HashMap::from([(pubkey, data.clone())]))).await;
+                            //Some(&HashMap::from([(pubkey, data.clone())]))
+                            None
+                            ).await;
 
                         //scan obligations
                         let obligations = market_obligations_map.get(market_pubkey).unwrap();
