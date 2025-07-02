@@ -14,7 +14,7 @@ use anyhow::Result;
 use futures::SinkExt;
 use futures_util::stream::StreamExt;
 use kamino_lending::{LendingMarket, Reserve, Obligation, ReferrerTokenState};
-use log;
+use scope::OraclePrices as ScopePrices;
 use orbit_link::{async_client::AsyncClient, OrbitLink};
 use spl_associated_token_account::instruction::create_associated_token_account;
 use tracing::info;
@@ -29,6 +29,38 @@ use crate::{
     scan_obligations,
     sysvars,
 };
+
+// Local types for scope price functionality
+type ScopePriceId = u16;
+type ScopeConversionChain = [ScopePriceId; 4];
+
+#[derive(Debug, Clone)]
+pub struct TimestampedPrice {
+    pub price_value: u64,
+    pub price_exp: u32,
+    pub timestamp: u64,
+}
+
+// Local implementation of get_price_usd function
+fn get_price_usd(
+    scope_prices: &ScopePrices,
+    tokens_chain: ScopeConversionChain,
+) -> Option<TimestampedPrice> {
+    if tokens_chain == [0, 0, 0, 0] {
+        return None;
+    }
+
+    // Get the first price in the chain (simplified implementation)
+    if let Some(price_info) = scope_prices.prices.get(tokens_chain[0] as usize) {
+        Some(TimestampedPrice {
+            price_value: price_info.price.value,
+            price_exp: price_info.price.exp as u32,
+            timestamp: price_info.unix_timestamp,
+        })
+    } else {
+        None
+    }
+}
 
 pub fn create_is_signer_account_infos<'a>(
     accounts: &'a mut [(Pubkey, bool, &'a mut Account)],
@@ -252,7 +284,7 @@ pub async fn account_update_ws(
     let scope_price_pubkeys = all_scope_price_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
     let switchboard_pubkeys = all_switchboard_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
     let pubkeys: Vec<Pubkey> = HashSet::<Pubkey>::from_iter([scope_price_pubkeys, switchboard_pubkeys].concat()).into_iter().collect();
-    log::info!("account update ws: {:?}", pubkeys);
+    info!("account update ws: {:?}", pubkeys);
 
     let mut accounts = HashMap::new();
     let mut obligation_map: HashMap<Pubkey, Obligation> = HashMap::new();
@@ -277,7 +309,7 @@ pub async fn account_update_ws(
             endpoint, e
         ))
     })?;
-    log::info!("Connected to the gRPC server");
+    info!("Connected to the gRPC server");
     subscribe_tx
         .send(SubscribeRequest {
             slots: HashMap::new(),
@@ -309,8 +341,8 @@ pub async fn account_update_ws(
                     let start = std::time::Instant::now();
                     let data = account.data;
                     let pubkey = Pubkey::try_from(account.pubkey.as_slice()).unwrap();
-                    //let scope_prices = bytemuck::from_bytes::<ScopePrices>(&data[8..]);
-                    //info!("Account: {:?}, scope_prices updated: {:?}", pubkey, scope_prices.prices.len());
+                    let scope_prices = bytemuck::from_bytes::<ScopePrices>(&data[8..]);
+                    info!("Account: {:?}, scope_prices updated: {:?}", pubkey, scope_prices.prices.len());
 
                     //update reserves
                     let clock = sysvars::clock(&klend_client.client.client).await;
@@ -319,6 +351,17 @@ pub async fn account_update_ws(
                     //    let price_age_in_seconds = clock.unix_timestamp.saturating_sub(price.unix_timestamp as i64);
                     //    info!("Price age: {:?} second, price: value={}, exp={}", price_age_in_seconds, price.price.value, price.price.exp);
                     //}
+
+                    for reserve in all_reserves.values() {
+                        info!("reserve: {:?}", reserve.config.token_info.scope_configuration.price_feed);
+                        if reserve.config.token_info.scope_configuration.price_feed == pubkey {
+                            if let Some(price) = get_price_usd(&scope_prices, reserve.config.token_info.scope_configuration.price_chain) {
+                                let price_age_in_seconds = clock.unix_timestamp.saturating_sub(price.timestamp as i64);
+                                info!("reserve: {} price: {:?} age: {:?} seconds", reserve.config.token_info.symbol(), price, price_age_in_seconds);
+                            }
+                        }
+                    }
+
 
                     for market_pubkey in market_pubkeys {
                         let _ = refresh_market(klend_client,
@@ -330,7 +373,7 @@ pub async fn account_update_ws(
                             Some(all_scope_price_accounts),
                             Some(all_switchboard_accounts),
                             //Some(&HashMap::from([(pubkey, data.clone())]))
-                            None
+                            Some(&HashMap::from([(pubkey, data.clone())]))
                             ).await;
 
                         //scan obligations
@@ -345,13 +388,13 @@ pub async fn account_update_ws(
                             all_rts.get(market_pubkey).unwrap()).await;
 
                         let duration = start.elapsed();
-                        log::info!("Scan {} obligations, time used: {:?} s", obligations.len(), duration);
+                        info!("Scan {} obligations, time used: {:?} s", obligations.len(), duration);
                     }
 
                 }
             }
         } else {
-            log::info!("Account Update error: {:?}", message);
+            info!("Account Update error: {:?}", message);
             break;
         }
     }

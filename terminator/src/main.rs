@@ -1323,8 +1323,8 @@ async fn load_market_accounts_and_rts(klend_client: &Arc<KlendClient>, market: &
 
 async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  obligation_reservers_to_refresh: &Vec<Pubkey>,
     reserves: &mut HashMap<Pubkey, Reserve>, lending_market: &mut LendingMarket, clock: &Clock,
-    mut scope_price_accounts: Option<&mut Vec<(Pubkey, bool, Account)>>,
-    mut switchboard_accounts: Option<&mut Vec<(Pubkey, bool, Account)>>,
+    scope_price_accounts: Option<&mut Vec<(Pubkey, bool, Account)>>,
+    switchboard_accounts: Option<&mut Vec<(Pubkey, bool, Account)>>,
     updated_account_data: Option<&HashMap<Pubkey, Vec<u8>>>)
 -> Result<()> {
     let start = std::time::Instant::now();
@@ -1344,34 +1344,37 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
     //let en_rts = start.elapsed().as_secs_f64();
     //info!("Refreshing market referrer token states {} time used: {}s", market.to_string().green(), en_rts);
 
-    let (mut pyth_accounts, mut switchboard_accounts, mut scope_price_accounts_vec) = match updated_account_data {
-        Some(updated_account_data) => {
-            // Update existing scope price accounts with new data
-            if let Some(ref mut accounts) = scope_price_accounts {
-                for (key, data) in updated_account_data.iter() {
-                    if let Some(scope_price_account) = accounts.iter_mut().find(|(k, _, _)| *k == *key) {
-                        scope_price_account.2.data = data.clone();
-                        info!("updated scope_price_account: {:?}", scope_price_account.0.to_string());
-                    }
-                }
-            } else {
-                return Err(anyhow::anyhow!("scope_price_accounts parameter is required when updated_scope_account_data is provided"));
+                // First get oracle accounts
+    let (mut pyth_accounts, mut switchboard_accounts_vec, mut scope_price_accounts_vec) =
+        if let Some(updated_account_data) = updated_account_data {
+            // Use the provided accounts and update them with new data
+            if scope_price_accounts.is_none() || switchboard_accounts.is_none() {
+                return Err(anyhow::anyhow!("oracle accounts parameters are required when updated_account_data is provided"));
             }
 
-            if let Some(ref mut accounts) = switchboard_accounts {
-                for (key, data) in updated_account_data.iter() {
-                    if let Some(switchboard_account) = accounts.iter_mut().find(|(k, _, _)| *k == *key) {
-                        switchboard_account.2.data = data.clone();
-                        info!("updated switchboard_account: {:?}", switchboard_account.0.to_string());
-                    }
+            let mut updated_scope_accounts = scope_price_accounts.unwrap().clone();
+            let mut updated_switchboard_accounts = switchboard_accounts.unwrap().clone();
+
+            // Update accounts with new data
+            for (key, data) in updated_account_data.iter() {
+                if let Some(scope_price_account) = updated_scope_accounts.iter_mut().find(|(k, _, _)| *k == *key) {
+                    let old_data_len = scope_price_account.2.data.len();
+                    scope_price_account.2.data = data.clone();
+                    info!("updated scope_price_account: {:?} (data length: {} -> {})",
+                        scope_price_account.0.to_string(), old_data_len, data.len());
                 }
-            } else {
-                return Err(anyhow::anyhow!("switchboard_accounts parameter is required when updated_account_data is provided"));
+
+                if let Some(switchboard_account) = updated_switchboard_accounts.iter_mut().find(|(k, _, _)| *k == *key) {
+                    let old_data_len = switchboard_account.2.data.len();
+                    switchboard_account.2.data = data.clone();
+                    info!("updated switchboard_account: {:?} (data length: {} -> {})",
+                        switchboard_account.0.to_string(), old_data_len, data.len());
+                }
             }
 
-            (Vec::new(), switchboard_accounts.unwrap().clone(), scope_price_accounts.unwrap().clone())
-        }
-        None => {
+            (Vec::new(), updated_switchboard_accounts, updated_scope_accounts)
+        } else {
+            // Fetch fresh oracle accounts
             let OracleAccounts {
                 pyth_accounts,
                 switchboard_accounts,
@@ -1385,15 +1388,14 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
             };
 
             (pyth_accounts, switchboard_accounts, scope_accounts)
-        }
-    };
+        };
 
 
     let en_oracle_accounts = start.elapsed().as_secs_f64();
     debug!("Refreshing market oracle accounts {} time used: {}s", market.to_string().green(), en_oracle_accounts);
 
     let pyth_account_infos = map_accounts_and_create_infos(&mut pyth_accounts);
-    let switchboard_feed_infos = map_accounts_and_create_infos(&mut switchboard_accounts);
+    let switchboard_feed_infos = map_accounts_and_create_infos(&mut switchboard_accounts_vec);
     let scope_price_infos = map_accounts_and_create_infos(&mut scope_price_accounts_vec);
 
     let refresh_set: HashSet<&Pubkey> = obligation_reservers_to_refresh.iter().collect();
@@ -1454,7 +1456,7 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
                 &scope_price_infos,
             ) {
                 Ok(_) => {
-                    info!("Refreshed reserve {} token {} with status {}", key.to_string().green(), reserve.config.token_info.symbol().purple(), reserve.config.status);
+                    debug!("Refreshed reserve {} token {} with status {}", key.to_string().green(), reserve.config.token_info.symbol().purple(), reserve.config.status);
                 }
                 Err(e) => {
                     error!("Error refreshing reserve {} token {} with status {}: {}", key.to_string().green(), reserve.config.token_info.symbol().purple(), reserve.config.status, e);
