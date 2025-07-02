@@ -19,7 +19,7 @@ use orbit_link::{async_client::AsyncClient, OrbitLink};
 use spl_associated_token_account::instruction::create_associated_token_account;
 use tracing::info;
 use yellowstone_grpc_proto::prelude::{SubscribeRequest, SubscribeRequestFilterAccounts, subscribe_update::UpdateOneof};
-use scope::OraclePrices as ScopePrices;
+use yellowstone_grpc_proto::geyser::CommitmentLevel;
 
 use crate::{
     client::{rpc, KlendClient},
@@ -285,7 +285,7 @@ pub async fn account_update_ws(
             transactions: HashMap::new(),
             blocks: HashMap::new(),
             blocks_meta: HashMap::new(),
-            commitment: None,
+            commitment: Some(CommitmentLevel::Processed.into()),
             accounts_data_slice: vec![],
             transactions_status: HashMap::new(),
             ping: None,
