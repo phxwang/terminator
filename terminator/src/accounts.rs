@@ -14,10 +14,10 @@ use anyhow::Result;
 use futures::SinkExt;
 use futures_util::stream::StreamExt;
 use kamino_lending::{LendingMarket, Reserve, Obligation, ReferrerTokenState};
-use scope::OraclePrices as ScopePrices;
+//use scope::OraclePrices as ScopePrices;
 use orbit_link::{async_client::AsyncClient, OrbitLink};
 use spl_associated_token_account::instruction::create_associated_token_account;
-use tracing::{info, debug};
+use tracing::{info};
 use yellowstone_grpc_proto::prelude::{SubscribeRequest, SubscribeRequestFilterAccounts, subscribe_update::UpdateOneof};
 use yellowstone_grpc_proto::geyser::CommitmentLevel;
 
@@ -31,18 +31,18 @@ use crate::{
 };
 
 // Local types for scope price functionality
-type ScopePriceId = u16;
-type ScopeConversionChain = [ScopePriceId; 4];
+//type ScopePriceId = u16;
+//type ScopeConversionChain = [ScopePriceId; 4];
 
-#[derive(Debug, Clone)]
+/*#[derive(Debug, Clone)]
 pub struct TimestampedPrice {
     pub price_value: u64,
     pub price_exp: u32,
     pub timestamp: u64,
-}
+}*/
 
 // Local implementation of get_price_usd function
-fn get_price_usd(
+/*fn get_price_usd(
     scope_prices: &ScopePrices,
     tokens_chain: ScopeConversionChain,
 ) -> Option<TimestampedPrice> {
@@ -60,7 +60,7 @@ fn get_price_usd(
     } else {
         None
     }
-}
+}*/
 
 pub fn create_is_signer_account_infos<'a>(
     accounts: &'a mut [(Pubkey, bool, &'a mut Account)],

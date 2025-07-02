@@ -225,7 +225,9 @@ async fn get_or_create_ata(
         Err(e) => {
             warn!("Failed to determine token program for mint {}: {}", mint, e);
             warn!("Skipping ATA creation for mint {} due to unknown token program", mint);
-            return Ok(None);
+            //sleep for 5 seconds
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            return Ok(Some(Token::id()));
         }
     };
 
