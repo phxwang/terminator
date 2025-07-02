@@ -120,14 +120,18 @@ impl KlendClient {
 
     pub async fn fetch_obligations_by_pubkey(&self, pubkeys: &[Pubkey]) -> Result<HashMap<Pubkey, Obligation>> {
         info!("Fetching obligations: {:?}", pubkeys);
-        let obligations = self
-            .client
-            .get_anchor_accounts::<Obligation>(pubkeys)
-            .await?;
+        // 按照最多100个一组进行分组
+        let chunks = pubkeys.chunks(100);
         let mut obligations_map = HashMap::new();
-        for (i, pubkey) in pubkeys.iter().enumerate() {
-            if let Some(obligation) = obligations[i] {
-                obligations_map.insert(*pubkey, obligation);
+        for chunk in chunks {
+            let obligations = self
+                .client
+                .get_anchor_accounts::<Obligation>(chunk)
+                .await?;
+            for (i, pubkey) in chunk.iter().enumerate() {
+                if let Some(obligation) = obligations[i] {
+                    obligations_map.insert(*pubkey, obligation);
+                }
             }
         }
         Ok(obligations_map)
