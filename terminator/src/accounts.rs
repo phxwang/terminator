@@ -436,7 +436,7 @@ pub async fn account_update_ws(
                     //update reserves
                     let clock = match sysvars::clock(&klend_client.local_client.client).await {
                         Ok(clock) => clock,
-                        Err(e) => {
+                        Err(_e) => {
                             continue;
                         }
                     };

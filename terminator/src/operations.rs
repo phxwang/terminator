@@ -7,7 +7,7 @@ use kamino_lending::{
     utils::seeds::BASE_SEED_REFERRER_TOKEN_STATE, LendingMarket, Obligation, ReferrerTokenState,
     Reserve,
 };
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     accounts::{map_accounts_and_create_infos, oracle_accounts, OracleAccounts},
@@ -184,8 +184,6 @@ pub fn split_obligations(obligations: &[(Pubkey, Obligation)]) -> SplitObligatio
 #[allow(clippy::too_many_arguments)]
 pub async fn refresh_reserves_and_obligation(
     klend_client: &KlendClient,
-    debt_res_key: &Pubkey,
-    coll_res_key: &Pubkey,
     obligation_addr: &Pubkey,
     obligation_state: &mut Obligation,
     reserves: &mut HashMap<Pubkey, Reserve>,
@@ -203,46 +201,46 @@ pub async fn refresh_reserves_and_obligation(
     let switchboard_feed_infos = map_accounts_and_create_infos(&mut switchboard_accounts);
     let scope_price_infos = map_accounts_and_create_infos(&mut scope_price_accounts);
 
-    // Refresh reserves and obligation
-    match reserves.get_mut(debt_res_key) {
-        Some(debt_reserve_state) => {
-            refresh_reserve(
-                debt_res_key,
-                debt_reserve_state,
-                lending_market,
-                clock,
-                &pyth_account_infos,
-                &switchboard_feed_infos,
-                &scope_price_infos,
-            )?;
-        },
-        None => {
-            warn!("debt_reserve_state not found: {:?}", debt_res_key);
-        }
-    };
-
-
-    match reserves.get_mut(coll_res_key) {
-        Some(coll_reserve_state) => {
-            refresh_reserve(
-                coll_res_key,
-                coll_reserve_state,
-                lending_market,
-                clock,
-                &pyth_account_infos,
-                &switchboard_feed_infos,
-                &scope_price_infos,
-            )?;
-        },
-        None => {
-            warn!("coll_reserve_state not found: {:?}", coll_res_key);
-        }
-    };
-
     let ObligationReserves {
         borrow_reserves,
         deposit_reserves,
     } = obligation_reserves(obligation_state, reserves)?;
+
+    // Refresh reserves and obligation
+    for reserve in borrow_reserves.iter() {
+        refresh_reserve(
+            &reserve.key,
+            &mut reserve.state.borrow_mut(),
+            lending_market,
+            clock,
+            &pyth_account_infos,
+            &switchboard_feed_infos,
+            &scope_price_infos,
+        )?;
+
+        // 同步更新的数据回原始的 reserves HashMap
+        reserves.insert(reserve.key, *reserve.state.borrow());
+
+        //info!("Borrow reserve: {:?}, last_update: {:?}", reserve.state.borrow().config.token_info.symbol(), reserve.state.borrow().last_update);
+    }
+
+    for reserve in deposit_reserves.iter() {
+        refresh_reserve(
+            &reserve.key,
+            &mut reserve.state.borrow_mut(),
+            lending_market,
+            clock,
+            &pyth_account_infos,
+            &switchboard_feed_infos,
+            &scope_price_infos,
+        )?;
+
+        // 同步更新的数据回原始的 reserves HashMap
+        reserves.insert(reserve.key, *reserve.state.borrow());
+
+        //info!("Deposit reserve: {:?}, last_update: {:?}", reserve.state.borrow().config.token_info.symbol(), reserve.state.borrow().last_update);
+    }
+
     let referrer_states = referrer_token_states_of_obligation(
         obligation_addr,
         obligation_state,
