@@ -627,9 +627,9 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
             liquidation_swap_slippage_pct
         ).await?;
 
-        info!("Jupiter swap ixns count: {:?}", jup_ixs.len());
-        debug!("Jupiter swap ixns: {:?}", jup_ixs);
-        debug!("Jupiter swap ixns lookup tables: {:?}", lookup_tables);
+        info!("Liquidating: Jupiter swap ixns count: {:?}", jup_ixs.len());
+        debug!("Liquidating: Jupiter swap ixns: {:?}", jup_ixs);
+        debug!("Liquidating: Jupiter swap ixns lookup tables: {:?}", lookup_tables);
 
         ixns.extend_from_slice(&jup_ixs.into_iter().filter(|ix| ix.program_id != compute_budget::id()).collect::<Vec<_>>());
         if let Some(tables) = lookup_tables {
@@ -658,8 +658,8 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
 
 
         let txn_b64 = txn.to_base64();
-        println!(
-            "Simulation: https://explorer.solana.com/tx/inspector?message={}",
+        info!(
+            "Liquidating: Simulation: https://explorer.solana.com/tx/inspector?message={}",
             urlencoding::encode(&txn_b64)
         );
 
@@ -672,7 +672,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
         };
 
         for ix in ixns {
-            info!("Instruction: {:?} {:?}", ix.program_id, ix.data);
+            info!("Liquidating: Instruction: {:?} {:?}", ix.program_id, ix.data);
         }
 
          match klend_client
@@ -693,17 +693,17 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
                                 .await
                                 {
                                     Ok(sig) => {
-                                        info!("Liquidation tx sent: {:?}", sig.0);
-                                        info!("Liquidation tx res: {:?}", sig.1);
+                                        info!("Liquidating: tx sent: {:?}", sig.0);
+                                        info!("Liquidating: tx res: {:?}", sig.1);
                                     }
                                     Err(e) => {
-                                        error!("Liquidation tx error: {:?}", e);
+                                        error!("Liquidating: tx error: {:?}", e);
                                     }
                                 }
                         }
                     }
                     Err(e) => {
-                        error!("Simulation error: {:?}", e);
+                        error!("Liquidating: Simulation error: {:?}", e);
                     }
                 }
     }
