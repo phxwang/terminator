@@ -394,7 +394,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, dont_re
             market_accs.reserves,
             market_accs.lending_market,
             HashMap::new(), // Empty RTS as we skip refresh
-            sysvars::clock(&klend_client.client.client).await,
+            sysvars::clock(&klend_client.local_client.client).await?,
         )
     } else {
         // Original refresh logic when dont_refresh is false
@@ -411,7 +411,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, dont_re
         // todo - don't load all
         let rts = klend_client.fetch_referrer_token_states().await?;
 
-        let clock = sysvars::clock(&klend_client.client.client).await;
+        let clock = sysvars::clock(&klend_client.local_client.client).await?;
 
         //find first borrowed_amount > 0
         let debt_res_key = ob.borrows.iter().find(|b| b.borrowed_amount_sf > 0).unwrap().borrow_reserve;
@@ -1157,7 +1157,7 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
 
             let mut reserves = market_accounts.reserves;
             let mut lending_market = market_accounts.lending_market;
-            let clock = sysvars::clock(&klend_client.client.client).await;
+            let clock = sysvars::clock(&klend_client.local_client.client).await?;
 
             match refresh_market(klend_client, market, &vec![], &mut reserves, &mut lending_market, &clock, None, None, None).await {
                 Ok(_) => (),

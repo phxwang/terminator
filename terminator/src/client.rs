@@ -125,7 +125,7 @@ impl KlendClient {
         let mut obligations_map = HashMap::new();
         for chunk in chunks {
             let obligations = self
-                .client
+                .local_client
                 .get_anchor_accounts::<Obligation>(chunk)
                 .await?;
             for (i, pubkey) in chunk.iter().enumerate() {

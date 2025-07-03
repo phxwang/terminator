@@ -1,6 +1,7 @@
 use anchor_lang::{prelude::Clock, solana_program::sysvar::SysvarId};
 use anyhow::Result;
 use orbit_link::async_client::AsyncClient;
+use tracing::error;
 
 /// Get current clock
 pub async fn get_clock(rpc: &impl AsyncClient) -> Result<Clock> {
@@ -10,6 +11,12 @@ pub async fn get_clock(rpc: &impl AsyncClient) -> Result<Clock> {
 }
 
 /// Get current clock
-pub async fn clock(rpc: &impl AsyncClient) -> Clock {
-    get_clock(rpc).await.unwrap()
+pub async fn clock(rpc: &impl AsyncClient) -> Result<Clock> {
+    match get_clock(rpc).await {
+        Ok(clock) => Ok(clock),
+        Err(e) => {
+            error!("Failed to get clock: {}", e);
+            Err(e)
+        }
+    }
 }

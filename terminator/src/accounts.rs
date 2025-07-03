@@ -394,14 +394,18 @@ pub async fn account_update_ws(
 
                 if let Some(account) = account {
 
-                    let start = std::time::Instant::now();
                     let data = account.data;
                     let pubkey = Pubkey::try_from(account.pubkey.as_slice()).unwrap();
                     //let scope_prices = bytemuck::from_bytes::<ScopePrices>(&data[8..]);
                     //info!("Account: {:?}, scope_prices updated: {:?}", pubkey, scope_prices.prices.len());
 
                     //update reserves
-                    let clock = sysvars::clock(&klend_client.client.client).await;
+                    let clock = match sysvars::clock(&klend_client.local_client.client).await {
+                        Ok(clock) => clock,
+                        Err(e) => {
+                            continue;
+                        }
+                    };
 
                     //for price in scope_prices.prices {
                     //    let price_age_in_seconds = clock.unix_timestamp.saturating_sub(price.unix_timestamp as i64);
@@ -419,6 +423,8 @@ pub async fn account_update_ws(
                     //}
 
                     for market_pubkey in market_pubkeys {
+                        let start = std::time::Instant::now();
+
                         // Now call refresh_market without additional updated_account_data since we've already updated the arrays
                         let _ = refresh_market(klend_client,
                             &market_pubkey,
