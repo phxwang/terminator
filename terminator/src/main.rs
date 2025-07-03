@@ -886,7 +886,7 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
         let refresh_en = refresh_start.elapsed().as_secs_f64();
         debug!("[Liquidation Thread] Refreshed market {} in {}s", market_pubkey.to_string().green(), refresh_en);
 
-        scan_obligations(klend_client, obligation_map, &mut obligation_reservers_to_refresh, &clock, liquidatable_obligations, reserves, lending_market, rts).await;
+        scan_obligations(klend_client, obligation_map, &mut obligation_reservers_to_refresh, &clock, liquidatable_obligations, reserves, lending_market, rts, None).await;
     }
     let en = start.elapsed().as_secs_f64();
     info!("[Liquidation Thread] Scanned {} obligations in {}s", total_liquidatable_obligations, en);
@@ -901,7 +901,10 @@ async fn scan_obligations(
     clock: &Clock, liquidatable_obligations: &Vec<String>,
     reserves: &HashMap<Pubkey, Reserve>,
     lending_market: &LendingMarket,
-    rts: &HashMap<Pubkey, ReferrerTokenState>) {
+    rts: &HashMap<Pubkey, ReferrerTokenState>,
+    price_changed_reserves: Option<&HashSet<Pubkey>>) -> u32 {
+    let mut checked_obligation_count = 0;
+
     for address_str in liquidatable_obligations.iter() {
         let address = match Pubkey::from_str(address_str) {
             Ok(pubkey) => pubkey,
@@ -914,9 +917,19 @@ async fn scan_obligations(
         let start = std::time::Instant::now();
 
         if let Some(obligation) = obligation_map.get(&address) {
+            if let Some(price_changed_reserves) = price_changed_reserves {
+                //check if none of the reserves in the obligation are in the price_changed_reserves
+                if obligation.deposits.iter().all(|coll| !price_changed_reserves.contains(&coll.deposit_reserve)) &&
+                    obligation.borrows.iter().all(|borrow| !price_changed_reserves.contains(&borrow.borrow_reserve)) {
+                    debug!("[Liquidation Thread] Obligation reserves not changed, skip: {} {}", address.to_string().green(), obligation.to_string().green());
+                    continue;
+                }
+            }
+
             if let Err(e) = check_and_liquidate(klend_client, &address, *obligation, &lending_market, clock, &reserves, &rts).await {
                 error!("[Liquidation Thread] Error checking/liquidating obligation {}: {}", address, e);
             }
+            checked_obligation_count += 1;
         } else {
             match klend_client.fetch_obligation(&address).await {
                 Ok(obligation) => {
@@ -926,6 +939,7 @@ async fn scan_obligations(
                     if let Err(e) = check_and_liquidate(klend_client, &address, obligation, &lending_market, clock, &reserves, &rts).await {
                         error!("[Liquidation Thread] Error checking/liquidating obligation {}: {}", address, e);
                     }
+                    checked_obligation_count += 1;
                 }
                 Err(e) => {
                     error!("[Liquidation Thread] Error fetching obligation {}: {}", address, e);
@@ -937,6 +951,7 @@ async fn scan_obligations(
         let en = start.elapsed().as_secs_f64();
         debug!("[Liquidation Thread] Processed obligation time used: {} in {}s", address.to_string().green(), en);
     }
+    checked_obligation_count
 }
 
 async fn load_obligations_map(scope: String) -> Result<HashMap<String, Vec<String>>, std::result::Result<(), anyhow::Error>> {

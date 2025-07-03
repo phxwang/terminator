@@ -15,7 +15,7 @@ use anyhow::Result;
 use futures::SinkExt;
 use futures_util::stream::StreamExt;
 use kamino_lending::{LendingMarket, Reserve, Obligation, ReferrerTokenState};
-//use scope::OraclePrices as ScopePrices;
+use scope::OraclePrices as ScopePrices;
 use orbit_link::{async_client::AsyncClient, OrbitLink};
 use spl_associated_token_account::instruction::create_associated_token_account;
 use tracing::{info, debug, error};
@@ -33,18 +33,18 @@ use crate::{
 };
 
 // Local types for scope price functionality
-//type ScopePriceId = u16;
-//type ScopeConversionChain = [ScopePriceId; 4];
+type ScopePriceId = u16;
+type ScopeConversionChain = [ScopePriceId; 4];
 
-/*#[derive(Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct TimestampedPrice {
     pub price_value: u64,
     pub price_exp: u32,
     pub timestamp: u64,
-}*/
+}
 
 // Local implementation of get_price_usd function
-/*fn get_price_usd(
+fn get_price_usd(
     scope_prices: &ScopePrices,
     tokens_chain: ScopeConversionChain,
 ) -> Option<TimestampedPrice> {
@@ -62,7 +62,7 @@ pub struct TimestampedPrice {
     } else {
         None
     }
-}*/
+}
 
 pub fn create_is_signer_account_infos<'a>(
     accounts: &'a mut [(Pubkey, bool, &'a mut Account)],
@@ -387,6 +387,8 @@ pub async fn account_update_ws(
             ))
         })?;
 
+    let mut reserves_prices: HashMap<Pubkey, TimestampedPrice> = HashMap::new();
+
     while let Some(message) = stream.next().await {
         if let Ok(msg) = message {
             if let Some(UpdateOneof::Account(account)) = msg.update_oneof {
@@ -396,8 +398,40 @@ pub async fn account_update_ws(
 
                     let data = account.data;
                     let pubkey = Pubkey::try_from(account.pubkey.as_slice()).unwrap();
-                    //let scope_prices = bytemuck::from_bytes::<ScopePrices>(&data[8..]);
+                    let scope_prices = bytemuck::from_bytes::<ScopePrices>(&data[8..]);
                     //info!("Account: {:?}, scope_prices updated: {:?}", pubkey, scope_prices.prices.len());
+
+                    //for price in scope_prices.prices {
+                    //    let price_age_in_seconds = clock.unix_timestamp.saturating_sub(price.unix_timestamp as i64);
+                    //    info!("Price age: {:?} second, price: value={}, exp={}", price_age_in_seconds, price.price.value, price.price.exp);
+                    //}
+
+                    let mut price_changed_reserves: HashSet<Pubkey> = HashSet::new();
+
+                    for (reserve_pubkey, reserve) in all_reserves.iter() {
+                        if reserve.config.token_info.scope_configuration.price_feed == pubkey {
+                            if let Some(price) = get_price_usd(&scope_prices, reserve.config.token_info.scope_configuration.price_chain) {
+                                //let price_age_in_seconds = clock.unix_timestamp.saturating_sub(price.timestamp as i64);
+                                //info!("WebSocket update - reserve: {} price: {:?} age: {:?} seconds", reserve.config.token_info.symbol(), price, price_age_in_seconds);
+                                if let Some(old_price) = reserves_prices.get(reserve_pubkey) {
+                                    if old_price.price_value != price.price_value {
+                                        price_changed_reserves.insert(*reserve_pubkey);
+                                        reserves_prices.insert(*reserve_pubkey, price.clone());
+                                        info!("Price changed for reserve: {} new price: {:?}", reserve.config.token_info.symbol(), price);
+                                    }
+                                } else {
+                                    price_changed_reserves.insert(*reserve_pubkey);
+                                    reserves_prices.insert(*reserve_pubkey, price.clone());
+                                    info!("Price changed for reserve: {} new price: {:?}", reserve.config.token_info.symbol(), price);
+                                }
+                            }
+                        }
+                    }
+
+                    if price_changed_reserves.is_empty() {
+                        info!("No price changed for reserves, skip");
+                        continue;
+                    }
 
                     //update reserves
                     let clock = match sysvars::clock(&klend_client.local_client.client).await {
@@ -406,21 +440,6 @@ pub async fn account_update_ws(
                             continue;
                         }
                     };
-
-                    //for price in scope_prices.prices {
-                    //    let price_age_in_seconds = clock.unix_timestamp.saturating_sub(price.unix_timestamp as i64);
-                    //    info!("Price age: {:?} second, price: value={}, exp={}", price_age_in_seconds, price.price.value, price.price.exp);
-                    //}
-
-                    //for reserve in all_reserves.values() {
-                    //   debug!("reserve: {:?}", reserve.config.token_info.scope_configuration.price_feed);
-                    //    if reserve.config.token_info.scope_configuration.price_feed == pubkey {
-                    //        if let Some(price) = get_price_usd(&scope_prices, reserve.config.token_info.scope_configuration.price_chain) {
-                    //            let price_age_in_seconds = clock.unix_timestamp.saturating_sub(price.timestamp as i64);
-                    //            info!("WebSocket update - reserve: {} price: {:?} age: {:?} seconds", reserve.config.token_info.symbol(), price, price_age_in_seconds);
-                    //        }
-                    //    }
-                    //}
 
                     for market_pubkey in market_pubkeys {
                         let start = std::time::Instant::now();
@@ -439,20 +458,21 @@ pub async fn account_update_ws(
 
                         //scan obligations
                         let obligations = market_obligations_map.get(market_pubkey).unwrap();
-                        {
-                            let mut obligation_map_write = obligation_map.write().unwrap();
-                            let _ = scan_obligations(klend_client,
-                                &mut obligation_map_write,
-                                &mut obligation_reservers_to_refresh,
-                                &clock,
-                                &obligations,
-                                all_reserves,
-                                all_lending_market.get(market_pubkey).unwrap(),
-                                all_rts.get(market_pubkey).unwrap()).await;
-                        }
+
+                        let mut obligation_map_write = obligation_map.write().unwrap();
+                        let checked_obligation_count = scan_obligations(klend_client,
+                            &mut obligation_map_write,
+                            &mut obligation_reservers_to_refresh,
+                            &clock,
+                            &obligations,
+                            all_reserves,
+                            all_lending_market.get(market_pubkey).unwrap(),
+                            all_rts.get(market_pubkey).unwrap(),
+                            Some(&price_changed_reserves)
+                        ).await;
 
                         let duration = start.elapsed();
-                        info!("Scan {} obligations, time used: {:?} s", obligations.len(), duration);
+                        info!("Scan {} obligations, time used: {:?} s, checked {} obligations", obligations.len(), duration, checked_obligation_count);
                     }
 
                 }
