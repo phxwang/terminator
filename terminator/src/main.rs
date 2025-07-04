@@ -389,6 +389,8 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
         .fetch_market_and_reserves(&ob.lending_market)
         .await?;
 
+    info!("Liquidating: Obligation: {:?}", ob);
+
     let mut reserves = market_accs.reserves;
     let market = market_accs.lending_market;
     // todo - don't load all
@@ -439,6 +441,9 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
             return Err(anyhow::anyhow!("Collateral reserve not found in reserves"));
         }
     };
+
+    info!("Liquidating: debt_reserve_state: {:?}", debt_reserve_state);
+    info!("Liquidating: coll_reserve_state: {:?}", coll_reserve_state);
 
     let debt_reserve = StateWithKey::new(debt_reserve_state, debt_res_key);
     let coll_reserve = StateWithKey::new(coll_reserve_state, coll_res_key);
@@ -759,7 +764,7 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
 
     let obligation_stats = math::obligation_info(address, &obligation);
     if obligation_stats.ltv > obligation_stats.unhealthy_ltv {
-        info!("[Liquidation Thread] Liquidating obligation start: {} {}", address.to_string().green(), obligation.to_string().green());
+        info!("[Liquidation Thread] Liquidating obligation start: pubkey: {}, obligation: {}, slot: {}", address.to_string().green(), obligation.to_string().green(), clock.slot);
 
         let liquidate_start = std::time::Instant::now();
         match liquidate(klend_client, address, true).await {
