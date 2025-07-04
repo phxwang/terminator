@@ -111,8 +111,7 @@ impl Liquidator {
             .flat_map(|(_, r)| [r.liquidity.mint_pubkey, r.collateral.mint_pubkey])
             .collect();
         // Load wallet
-        let atas = HashMap::new();
-        let wallet = match { client.client.payer().ok() } {
+        let (wallet, atas) = match { client.client.payer().ok() } {
             Some(wallet) => {
                 // Load or create atas
                 info!("Loading atas...");
@@ -121,11 +120,11 @@ impl Liquidator {
                 info!(
                     "Loaded liquidator {} with {} tokens",
                     wallet.pubkey(),
-                    atas.len(),
+                    atas.len()
                 );
-                wallet
+                (wallet, atas)
             }
-            None => Arc::new(Keypair::new()),
+            None => (Arc::new(Keypair::new()), HashMap::new()),
         };
 
         let liquidator = Liquidator { wallet, atas };

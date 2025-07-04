@@ -1,7 +1,8 @@
 use anchor_lang::prelude::Pubkey;
 use anyhow::Result;
 use colored::Colorize;
-use kamino_lending::{utils::Fraction, LiquidationParams, Obligation};
+use kamino_lending::{utils::Fraction, LiquidationParams, Obligation, ObligationCollateral, Reserve};
+use std::collections::HashMap;
 use tracing::{debug, info};
 
 use crate::{liquidator::Holdings, model::StateWithKey};
@@ -269,4 +270,23 @@ pub fn decide_liquidation_strategy(
     );
 
     Ok(decision)
+}
+
+pub fn find_best_collateral_reserve(
+    deposits: &[ObligationCollateral],
+    reserves: &HashMap<Pubkey, Reserve>,
+) -> Option<Pubkey> {
+    // find the collateral reserve with the highest market value
+    let mut best_reserve = None;
+    let mut best_mv = Fraction::ZERO;
+
+    for deposit in deposits {
+        let mv = Fraction::from_bits(deposit.market_value_sf);
+        if mv > best_mv {
+            best_mv = mv;
+            best_reserve = Some(deposit.deposit_reserve);
+        }
+    }
+
+    best_reserve
 }

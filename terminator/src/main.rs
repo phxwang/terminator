@@ -418,11 +418,11 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
     };
 
     //find first deposited_amount > 0
-    let coll_res_key = match ob.deposits.iter().find(|d| d.deposited_amount > 0) {
-        Some(deposit) => deposit.deposit_reserve,
+    let coll_res_key = match math::find_best_collateral_reserve(&ob.deposits, &reserves) {
+        Some(key) => key,
         None => {
-            error!("No deposited amount found for obligation {}", obligation);
-            return Err(anyhow::anyhow!("No deposited amount found for obligation"));
+            error!("No collateral reserve found for obligation {}", obligation);
+            return Err(anyhow::anyhow!("No collateral reserve found for obligation"));
         }
     };
 
