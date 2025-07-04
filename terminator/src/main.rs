@@ -680,37 +680,20 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
             info!("Liquidating: Instruction: {:?} {:?}", ix.program_id, ix.data);
         }
 
-         match klend_client
-                .local_client
-                .client
-                .simulate_transaction(&txn)
-                .await
-                {
-                    Ok(res) => {
-                        info!("Simulation result: {:?}", res);
 
-                        let simulate_only = false;
-
-                        if !simulate_only {
-                            match klend_client
-                                .local_client
-                                .send_retry_and_confirm_transaction(txn, None, false)
-                                .await
-                                {
-                                    Ok(sig) => {
-                                        info!("Liquidating: tx sent: {:?}", sig.0);
-                                        info!("Liquidating: tx res: {:?}", sig.1);
-                                    }
-                                    Err(e) => {
-                                        error!("Liquidating: tx error: {:?}", e);
-                                    }
-                                }
-                        }
-                    }
-                    Err(e) => {
-                        error!("Liquidating: Simulation error: {:?}", e);
-                    }
+        match klend_client
+            .local_client
+            .send_retry_and_confirm_transaction(txn, None, false)
+            .await
+            {
+                Ok(sig) => {
+                    info!("Liquidating: tx sent: {:?}", sig.0);
+                    info!("Liquidating: tx res: {:?}", sig.1);
                 }
+                Err(e) => {
+                    error!("Liquidating: tx error: {:?}", e);
+                }
+            }
     }
     Ok(())
 }
