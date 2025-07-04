@@ -676,9 +676,25 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
             }
         };
 
+        info!("Liquidating: txn.message.address_table_lookups: {:?}", txn.message.address_table_lookups());
+
         for ix in ixns {
             info!("Liquidating: Instruction: {:?} {:?}", ix.program_id, ix.data);
         }
+
+        match klend_client
+            .local_client
+            .client
+            .simulate_transaction(&txn)
+            .await
+            {
+                Ok(res) => {
+                    info!("Liquidating: Simulation result: {:?}", res);
+                }
+                Err(e) => {
+                    error!("Liquidating: Simulation error: {:?}", e);
+                }
+            }
 
 
         match klend_client

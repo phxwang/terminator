@@ -212,7 +212,7 @@ async fn get_or_create_atas(
     let owner_pubkey = &owner.pubkey();
 
     // Determine the correct token program for these mints
-    let token_program_ids = match get_token_program_ids(&client.client.client, &mints.to_vec()).await {
+    let token_program_ids = match get_token_program_ids(&client.local_client.client, &mints.to_vec()).await {
         Ok(token_program_ids) => token_program_ids,
         Err(e) => {
             warn!("Failed to determine token program for mints: {}", e);
@@ -241,7 +241,7 @@ async fn get_or_create_atas(
 
             let ix = create_associated_token_account(owner_pubkey, owner_pubkey, mint, token_program_id);
             let tx = match client
-                .client
+                .local_client
                 .tx_builder()
                 .add_ix(ix)
                 .build(&[])

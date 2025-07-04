@@ -112,7 +112,7 @@ impl KlendClient {
     pub async fn fetch_obligation(&self, obligation_address: &Pubkey) -> Result<Obligation> {
         info!("Fetching obligation: {}", obligation_address);
         let obligation = self
-            .client
+            .local_client
             .get_anchor_account::<Obligation>(obligation_address)
             .await?;
         Ok(obligation)
@@ -161,6 +161,8 @@ impl KlendClient {
     pub async fn load_default_lookup_table(&mut self) {
         self.load_liquidator_lookup_table().await;
         self.client
+            .add_lookup_table(self.lookup_table.clone().unwrap());
+        self.local_client
             .add_lookup_table(self.lookup_table.clone().unwrap());
     }
 
