@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::str::FromStr;
 
 use anchor_client::{
     solana_client::{
@@ -19,7 +22,7 @@ use scope::OraclePrices as ScopePrices;
 use orbit_link::{async_client::AsyncClient, OrbitLink};
 use spl_associated_token_account::instruction::create_associated_token_account;
 use tracing::{info, debug, error};
-use yellowstone_grpc_proto::prelude::{SubscribeRequest, SubscribeRequestFilterAccounts, subscribe_update::UpdateOneof};
+use yellowstone_grpc_proto::prelude::{SubscribeRequest, SubscribeRequestFilterAccounts, SubscribeRequestFilterTransactions, subscribe_update::UpdateOneof};
 use yellowstone_grpc_proto::geyser::CommitmentLevel;
 use tokio::time::interval;
 
@@ -291,6 +294,18 @@ pub async fn find_accounts(
     Ok(accounts)
 }
 
+pub fn load_competitors_from_file() -> Result<Vec<Pubkey>> {
+    let file = File::open(".competitors")?;
+    let reader = BufReader::new(file);
+    let mut competitors = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        let pubkey = Pubkey::from_str(&line)?;
+        competitors.push(pubkey);
+    }
+    Ok(competitors)
+}
+
 pub async fn account_update_ws(
     klend_client: &Arc<KlendClient>,
     market_pubkeys: &Vec<Pubkey>,
@@ -305,10 +320,13 @@ pub async fn account_update_ws(
     // Collect all scope price account keys
     let scope_price_pubkeys = all_scope_price_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
     let switchboard_pubkeys = all_switchboard_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
-    let pubkeys: Vec<Pubkey> = HashSet::<Pubkey>::from_iter([scope_price_pubkeys, switchboard_pubkeys].concat()).into_iter().collect();
+    let mut pubkeys: Vec<Pubkey> = HashSet::<Pubkey>::from_iter([scope_price_pubkeys.clone(), switchboard_pubkeys].concat()).into_iter().collect();
     info!("account update ws: {:?}", pubkeys);
 
-    let mut accounts = HashMap::new();
+    let competitors = load_competitors_from_file()?;
+    info!("competitors: {:?}", competitors);
+
+
     let obligation_map: Arc<RwLock<HashMap<Pubkey, Obligation>>> = Arc::new(RwLock::new(HashMap::new()));
     let mut obligation_reservers_to_refresh: Vec<Pubkey> = vec![];
 
@@ -345,6 +363,8 @@ pub async fn account_update_ws(
             }
         }
     });
+
+    let mut accounts = HashMap::new();
     let account_filter = pubkeys.iter().map(|key| key.to_string()).collect::<Vec<String>>();
     accounts.insert(
         "client".to_string(),
@@ -352,6 +372,18 @@ pub async fn account_update_ws(
             account: account_filter,
             owner: vec![],
             filters: vec![],
+        },
+    );
+
+    let transactions_filter = competitors.iter().map(|key| key.to_string()).collect::<Vec<String>>();
+    let mut transactions = HashMap::new();
+    transactions.insert(
+        "transactions".to_string(),
+        SubscribeRequestFilterTransactions {
+            account_required: transactions_filter,
+            vote: Some(false),
+            failed: Some(false),
+            ..Default::default()
         },
     );
 
@@ -370,7 +402,7 @@ pub async fn account_update_ws(
         .send(SubscribeRequest {
             slots: HashMap::new(),
             accounts,
-            transactions: HashMap::new(),
+            transactions,
             blocks: HashMap::new(),
             blocks_meta: HashMap::new(),
             commitment: Some(CommitmentLevel::Processed.into()),
@@ -391,93 +423,103 @@ pub async fn account_update_ws(
 
     while let Some(message) = stream.next().await {
         if let Ok(msg) = message {
-            if let Some(UpdateOneof::Account(account)) = msg.update_oneof {
-                let account = account.account;
+            match msg.update_oneof {
+                Some(UpdateOneof::Account(account)) => {
 
-                if let Some(account) = account {
+                    let account = account.account;
 
-                    let data = account.data;
-                    let pubkey = Pubkey::try_from(account.pubkey.as_slice()).unwrap();
-                    let scope_prices = bytemuck::from_bytes::<ScopePrices>(&data[8..]);
-                    //info!("Account: {:?}, scope_prices updated: {:?}", pubkey, scope_prices.prices.len());
+                    if let Some(account) = account {
 
-                    //for price in scope_prices.prices {
-                    //    let price_age_in_seconds = clock.unix_timestamp.saturating_sub(price.unix_timestamp as i64);
-                    //    info!("Price age: {:?} second, price: value={}, exp={}", price_age_in_seconds, price.price.value, price.price.exp);
-                    //}
+                        let data = account.data;
+                        let pubkey = Pubkey::try_from(account.pubkey.as_slice()).unwrap();
 
-                    let mut price_changed_reserves: HashSet<Pubkey> = HashSet::new();
+                        let scope_prices = bytemuck::from_bytes::<ScopePrices>(&data[8..]);
+                        //info!("Account: {:?}, scope_prices updated: {:?}", pubkey, scope_prices.prices.len());
 
-                    for (reserve_pubkey, reserve) in all_reserves.iter() {
-                        if reserve.config.token_info.scope_configuration.price_feed == pubkey {
-                            if let Some(price) = get_price_usd(&scope_prices, reserve.config.token_info.scope_configuration.price_chain) {
-                                //let price_age_in_seconds = clock.unix_timestamp.saturating_sub(price.timestamp as i64);
-                                //info!("WebSocket update - reserve: {} price: {:?} age: {:?} seconds", reserve.config.token_info.symbol(), price, price_age_in_seconds);
-                                if let Some(old_price) = reserves_prices.get(reserve_pubkey) {
-                                    if old_price.price_value != price.price_value {
+                        //for price in scope_prices.prices {
+                        //    let price_age_in_seconds = clock.unix_timestamp.saturating_sub(price.unix_timestamp as i64);
+                        //    info!("Price age: {:?} second, price: value={}, exp={}", price_age_in_seconds, price.price.value, price.price.exp);
+                        //}
+
+                        let mut price_changed_reserves: HashSet<Pubkey> = HashSet::new();
+
+                        for (reserve_pubkey, reserve) in all_reserves.iter() {
+                            if reserve.config.token_info.scope_configuration.price_feed == pubkey {
+                                if let Some(price) = get_price_usd(&scope_prices, reserve.config.token_info.scope_configuration.price_chain) {
+                                    //let price_age_in_seconds = clock.unix_timestamp.saturating_sub(price.timestamp as i64);
+                                    //info!("WebSocket update - reserve: {} price: {:?} age: {:?} seconds", reserve.config.token_info.symbol(), price, price_age_in_seconds);
+                                    if let Some(old_price) = reserves_prices.get(reserve_pubkey) {
+                                        if old_price.price_value != price.price_value {
+                                            price_changed_reserves.insert(*reserve_pubkey);
+                                            reserves_prices.insert(*reserve_pubkey, price.clone());
+                                            info!("Price changed for reserve: {} new price: {:?}", reserve.config.token_info.symbol(), price);
+                                        }
+                                    } else {
                                         price_changed_reserves.insert(*reserve_pubkey);
                                         reserves_prices.insert(*reserve_pubkey, price.clone());
                                         info!("Price changed for reserve: {} new price: {:?}", reserve.config.token_info.symbol(), price);
                                     }
-                                } else {
-                                    price_changed_reserves.insert(*reserve_pubkey);
-                                    reserves_prices.insert(*reserve_pubkey, price.clone());
-                                    info!("Price changed for reserve: {} new price: {:?}", reserve.config.token_info.symbol(), price);
                                 }
                             }
                         }
-                    }
 
-                    if price_changed_reserves.is_empty() {
-                        info!("No price changed for reserves, skip");
-                        continue;
-                    }
-
-                    //update reserves
-                    let clock = match sysvars::clock(&klend_client.local_client.client).await {
-                        Ok(clock) => clock,
-                        Err(_e) => {
+                        if price_changed_reserves.is_empty() {
+                            info!("No price changed for reserves, skip");
                             continue;
                         }
-                    };
 
-                    for market_pubkey in market_pubkeys {
-                        let start = std::time::Instant::now();
+                        //update reserves
+                        let clock = match sysvars::clock(&klend_client.local_client.client).await {
+                            Ok(clock) => clock,
+                            Err(_e) => {
+                                continue;
+                            }
+                        };
 
-                        // Now call refresh_market without additional updated_account_data since we've already updated the arrays
-                        let _ = refresh_market(klend_client,
-                            &market_pubkey,
-                            &Vec::new(),
-                            all_reserves,
-                            all_lending_market.get_mut(market_pubkey).unwrap(),
-                            &clock,
-                            Some(all_scope_price_accounts),
-                            Some(all_switchboard_accounts),
-                            Some(&HashMap::from([(pubkey, data.clone())]))
+                        for market_pubkey in market_pubkeys {
+                            let start = std::time::Instant::now();
+
+                            // Now call refresh_market without additional updated_account_data since we've already updated the arrays
+                            let _ = refresh_market(klend_client,
+                                &market_pubkey,
+                                &Vec::new(),
+                                all_reserves,
+                                all_lending_market.get_mut(market_pubkey).unwrap(),
+                                &clock,
+                                Some(all_scope_price_accounts),
+                                Some(all_switchboard_accounts),
+                                Some(&HashMap::from([(pubkey, data.clone())]))
+                                ).await;
+
+                            //scan obligations
+                            let obligations = market_obligations_map.get(market_pubkey).unwrap();
+
+                            let mut obligation_map_write = obligation_map.write().unwrap();
+                            let checked_obligation_count = scan_obligations(klend_client,
+                                &mut obligation_map_write,
+                                &mut obligation_reservers_to_refresh,
+                                &clock,
+                                &obligations,
+                                all_reserves,
+                                all_lending_market.get(market_pubkey).unwrap(),
+                                all_rts.get(market_pubkey).unwrap(),
+                                Some(&price_changed_reserves)
                             ).await;
 
-                        //scan obligations
-                        let obligations = market_obligations_map.get(market_pubkey).unwrap();
-
-                        let mut obligation_map_write = obligation_map.write().unwrap();
-                        let checked_obligation_count = scan_obligations(klend_client,
-                            &mut obligation_map_write,
-                            &mut obligation_reservers_to_refresh,
-                            &clock,
-                            &obligations,
-                            all_reserves,
-                            all_lending_market.get(market_pubkey).unwrap(),
-                            all_rts.get(market_pubkey).unwrap(),
-                            Some(&price_changed_reserves)
-                        ).await;
-
-                        let duration = start.elapsed();
-                        info!("Scan {} obligations, time used: {:?} s, checked {} obligations", obligations.len(), duration, checked_obligation_count);
+                            let duration = start.elapsed();
+                            info!("Scan {} obligations, time used: {:?} s, checked {} obligations", obligations.len(), duration, checked_obligation_count);
+                        }
                     }
-
+                },
+                Some(UpdateOneof::Transaction(transaction)) => {
+                    info!("Transaction of competitor: {:?}", transaction);
+                },
+                _ => {
+                    info!("Unknown update oneof: {:?}", msg.update_oneof);
                 }
             }
-        } else {
+        }
+        else {
             info!("Account Update error: {:?}", message);
             break;
         }
