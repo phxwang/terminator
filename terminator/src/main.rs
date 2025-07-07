@@ -394,14 +394,13 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
     // todo - don't load all
     let rts = klend_client.fetch_referrer_token_states().await?;
 
-    liquidate_with_loaded_data(klend_client, obligation, rebalance_config, clock, ob, reserves, market, rts).await?;
+    liquidate_with_loaded_data(klend_client, obligation, clock, ob, reserves, market, rts).await?;
     Ok(())
 }
 
 async fn liquidate_with_loaded_data(
     klend_client: &Arc<KlendClient>,
     obligation: &Pubkey,
-    rebalance_config: &client::RebalanceConfig,
     clock: Clock,
     mut ob: Obligation,
     mut reserves: HashMap<Pubkey, Reserve>,
@@ -519,7 +518,7 @@ async fn liquidate_with_loaded_data(
         }
 
         let _user = klend_client.liquidator.wallet.pubkey();
-        let _base_mint = &rebalance_config.base_token;
+        //let _base_mint = &rebalance_config.base_token;
 
         let mut ixns = vec![];
         let mut luts = vec![];
