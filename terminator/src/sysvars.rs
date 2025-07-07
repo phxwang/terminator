@@ -1,4 +1,4 @@
-use anchor_lang::{prelude::Clock, solana_program::sysvar::SysvarId};
+use solana_sdk::{clock::Clock, sysvar::SysvarId};
 use anyhow::Result;
 use orbit_link::async_client::AsyncClient;
 use tracing::error;

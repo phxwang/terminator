@@ -13,6 +13,7 @@ use anchor_client::{
     solana_sdk::{account::Account, account_info::AccountInfo, pubkey::Pubkey, signer::Signer},
 };
 use anchor_lang::Id;
+use solana_sdk::{clock::Clock, sysvar::SysvarId};
 use anchor_spl::token::Token;
 use anyhow::Result;
 use futures::SinkExt;
@@ -321,6 +322,7 @@ pub async fn account_update_ws(
     let scope_price_pubkeys = all_scope_price_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
     let switchboard_pubkeys = all_switchboard_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
     let mut pubkeys: Vec<Pubkey> = HashSet::<Pubkey>::from_iter([scope_price_pubkeys.clone(), switchboard_pubkeys].concat()).into_iter().collect();
+    pubkeys.push(Clock::id());
     info!("account update ws: {:?}", pubkeys);
 
     let competitors = load_competitors_from_file()?;
@@ -421,6 +423,14 @@ pub async fn account_update_ws(
 
     let mut reserves_prices: HashMap<Pubkey, TimestampedPrice> = HashMap::new();
 
+    let mut clock = match sysvars::clock(&klend_client.local_client.client).await {
+        Ok(clock) => clock,
+        Err(_e) => {
+            error!("Failed to get clock");
+            return Err(anyhow::Error::msg("Failed to get clock"));
+        }
+    };
+
     while let Some(message) = stream.next().await {
         if let Ok(msg) = message {
             match msg.update_oneof {
@@ -429,9 +439,23 @@ pub async fn account_update_ws(
                     let account = account.account;
 
                     if let Some(account) = account {
-
-                        let data = account.data;
                         let pubkey = Pubkey::try_from(account.pubkey.as_slice()).unwrap();
+                        let data = account.data;
+                        if pubkey == Clock::id() {
+                            //update clock from account
+                            let account_data = Account {
+                                lamports: account.lamports,
+                                data: data.clone(),
+                                owner: account.owner.clone().try_into().unwrap(),
+                                executable: account.executable,
+                                rent_epoch: account.rent_epoch,
+                            };
+                            if let Ok(updated_clock) = account_data.deserialize_data::<Clock>() {
+                                clock = updated_clock;
+                                debug!("Clock updated: {:?}", clock);
+                            }
+                            continue;
+                        }
 
                         let scope_prices = bytemuck::from_bytes::<ScopePrices>(&data[8..]);
                         //info!("Account: {:?}, scope_prices updated: {:?}", pubkey, scope_prices.prices.len());
@@ -467,14 +491,6 @@ pub async fn account_update_ws(
                             info!("No price changed for reserves, skip");
                             continue;
                         }
-
-                        //update reserves
-                        let clock = match sysvars::clock(&klend_client.local_client.client).await {
-                            Ok(clock) => clock,
-                            Err(_e) => {
-                                continue;
-                            }
-                        };
 
                         for market_pubkey in market_pubkeys {
                             let start = std::time::Instant::now();
@@ -515,7 +531,7 @@ pub async fn account_update_ws(
                     info!("Transaction of competitor: {:?}", transaction);
                 },
                 _ => {
-                    info!("Unknown update oneof: {:?}", msg.update_oneof);
+                    debug!("Unknown update oneof: {:?}", msg.update_oneof);
                 }
             }
         }

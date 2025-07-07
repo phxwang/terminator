@@ -274,7 +274,7 @@ pub fn decide_liquidation_strategy(
 
 pub fn find_best_collateral_reserve(
     deposits: &[ObligationCollateral],
-    reserves: &HashMap<Pubkey, Reserve>,
+    _reserves: &HashMap<Pubkey, Reserve>,
 ) -> Option<Pubkey> {
     // find the collateral reserve with the highest market value
     let mut best_reserve = None;
