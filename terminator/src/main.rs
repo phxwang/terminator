@@ -389,14 +389,26 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
         .fetch_market_and_reserves(&ob.lending_market)
         .await?;
 
-    info!("Liquidating: Obligation: {:?}", ob);
-
     let mut reserves = market_accs.reserves;
     let market = market_accs.lending_market;
     // todo - don't load all
     let rts = klend_client.fetch_referrer_token_states().await?;
 
-    // Refresh reserves and obligation
+    liquidate_with_loaded_data(klend_client, obligation, rebalance_config, clock, ob, reserves, market, rts).await?;
+    Ok(())
+}
+
+async fn liquidate_with_loaded_data(
+    klend_client: &Arc<KlendClient>,
+    obligation: &Pubkey,
+    rebalance_config: &client::RebalanceConfig,
+    clock: Clock,
+    mut ob: Obligation,
+    mut reserves: HashMap<Pubkey, Reserve>,
+    market: LendingMarket,
+    rts: HashMap<Pubkey, ReferrerTokenState>
+) -> Result<(), anyhow::Error> {
+    info!("Liquidating: Obligation: {:?}", ob);
     operations::refresh_reserves_and_obligation(
         klend_client,
         obligation,
@@ -407,8 +419,6 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
         &clock,
     )
     .await?;
-
-    //find first borrowed_amount > 0
     let debt_res_key = match ob.borrows.iter().find(|b| b.borrowed_amount_sf > 0) {
         Some(borrow) => borrow.borrow_reserve,
         None => {
@@ -416,8 +426,6 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
             return Err(anyhow::anyhow!("No borrowed amount found for obligation"));
         }
     };
-
-    //find first deposited_amount > 0
     let coll_res_key = match math::find_best_collateral_reserve(&ob.deposits, &reserves) {
         Some(key) => key,
         None => {
@@ -425,8 +433,6 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
             return Err(anyhow::anyhow!("No collateral reserve found for obligation"));
         }
     };
-
-    // Now it's all fully refreshed and up to date
     let debt_reserve_state = match reserves.get(&debt_res_key) {
         Some(reserve) => *reserve,
         None => {
@@ -441,26 +447,16 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
             return Err(anyhow::anyhow!("Collateral reserve not found in reserves"));
         }
     };
-
     info!("Liquidating: debt_reserve_state: {:?}", debt_reserve_state);
     info!("Liquidating: coll_reserve_state: {:?}", coll_reserve_state);
-
     let debt_reserve = StateWithKey::new(debt_reserve_state, debt_res_key);
     let coll_reserve = StateWithKey::new(coll_reserve_state, coll_res_key);
     let lending_market = StateWithKey::new(market, ob.lending_market);
     let obligation = StateWithKey::new(ob, *obligation);
-    //let pxs = fetch_jup_prices(&[debt_mint], &rebalance_config.usdc_mint, 100.0).await?;
-    //let holdings = klend_client
-    //    .liquidator
-    //    .fetch_holdings(&klend_client.client.client, &reserves)
-    //    .await?;
-
     info!("Liquidating: Clock: {:?}", clock);
     info!("Liquidating: Debt reserve: {:?}, last_update: {:?}, is_stale: {:?}", debt_reserve_state.config.token_info.symbol(), debt_reserve_state.last_update, debt_reserve_state.last_update.is_stale(clock.slot, PriceStatusFlags::LIQUIDATION_CHECKS));
     info!("Liquidating: Coll reserve: {:?}, last_update: {:?}, is_stale: {:?}", coll_reserve_state.config.token_info.symbol(), coll_reserve_state.last_update, coll_reserve_state.last_update.is_stale(clock.slot, PriceStatusFlags::LIQUIDATION_CHECKS));
     debug!("Liquidating: Reserves for {:?}: {:?}", ob.lending_market, reserves.keys());
-
-
     let deposit_reserves: Vec<StateWithKey<Reserve>> = ob
         .deposits
         .iter()
@@ -475,30 +471,9 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
             }
         })
         .collect();
-
     let max_allowed_ltv_override_pct_opt = Some(0);
     let liquidation_swap_slippage_pct = 0 as f64;
     let min_acceptable_received_collateral_amount = 0;
-    //let liquidation_strategy = math::decide_liquidation_strategy(
-    //    &rebalance_config.base_token,
-    //    &obligation,
-    //    &lending_market,
-    //    &coll_reserve,
-    //    &debt_reserve,
-    //    &clock,
-    //    max_allowed_ltv_override_pct_opt,
-    //    liquidation_swap_slippage_pct,
-    //    holdings,
-    //)?;
-
-    /*let (swap_amount, liquidate_amount) = match liquidation_strategy {
-        Some(LiquidationStrategy::LiquidateAndRedeem(liquidate_amount)) => (0, liquidate_amount),
-        Some(LiquidationStrategy::SwapThenLiquidate(swap_amount, liquidate_amount)) => {
-            (swap_amount, liquidate_amount)
-        }
-        None => (0, 0),
-    };*/
-    //let _swap_amount = 0;
     let liquidate_amount = math::get_liquidatable_amount(
         &obligation,
         &lending_market,
@@ -508,12 +483,8 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
         max_allowed_ltv_override_pct_opt,
         liquidation_swap_slippage_pct,
     )?;
-
     let borrowed_amount = Fraction::from_sf(obligation.state.borrow().borrows.iter().find(|b| b.borrow_reserve == debt_res_key).unwrap().borrowed_amount_sf);
-
     info!("Liquidating amount: {}, borrowed_amount: {}", liquidate_amount, borrowed_amount);
-
-    // Simulate liquidation
     let res = kamino_lending::lending_market::lending_operations::liquidate_and_redeem(
         &lending_market.state.borrow(),
         &debt_reserve,
@@ -525,10 +496,8 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
         max_allowed_ltv_override_pct_opt,
         deposit_reserves.into_iter(),
     );
-
     info!("Simulating the Liquidating {:#?}", res);
-
-    if res.is_ok() {
+    Ok(if res.is_ok() {
         let total_withdraw_liquidity_amount = match res {
             Ok(result) => result.total_withdraw_liquidity_amount,
             Err(_) => {
@@ -712,8 +681,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
                     error!("Liquidating: tx error: {:?}", e);
                 }
             }
-    }
-    Ok(())
+    })
 }
 
 async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, mut obligation: Obligation, lending_market: &LendingMarket, clock: &Clock, reserves: &HashMap<Pubkey, Reserve>, rts: &HashMap<Pubkey, ReferrerTokenState>) -> Result<()> {
