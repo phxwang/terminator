@@ -5,7 +5,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use juno::DecompiledVersionedTx;
-use kamino_lending::{Reserve, LendingMarket, ReferrerTokenState, Obligation, PriceStatusFlags};
+use kamino_lending::{Reserve, LendingMarket, ReferrerTokenState, Obligation, PriceStatusFlags, fraction::Fraction, utils::FractionExtra};
 use solana_sdk::{
     signer::Signer,
     clock::Clock,
@@ -509,7 +509,9 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
         liquidation_swap_slippage_pct,
     )?;
 
-    info!("Liquidating amount: {}", liquidate_amount);
+    let borrowed_amount = Fraction::from_sf(obligation.state.borrow().borrows.iter().find(|b| b.borrow_reserve == debt_res_key).unwrap().borrowed_amount_sf);
+
+    info!("Liquidating amount: {}, borrowed_amount: {}", liquidate_amount, borrowed_amount);
 
     // Simulate liquidation
     let res = kamino_lending::lending_market::lending_operations::liquidate_and_redeem(
