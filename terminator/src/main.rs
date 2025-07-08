@@ -373,7 +373,7 @@ pub mod swap {
 async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_refresh: bool) -> Result<()> {
     info!("Liquidating obligation {}", obligation.to_string().green());
     debug!("Liquidator ATAs: {:?}", klend_client.liquidator.atas);
-    let rebalance_config = match &klend_client.rebalance_config {
+    let _rebalance_config = match &klend_client.rebalance_config {
         None => Err(anyhow::anyhow!("Rebalance settings not found")),
         Some(c) => Ok(c),
     }?;
@@ -384,12 +384,12 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_r
     let clock = sysvars::clock(&klend_client.local_client.client).await?;
 
     // Reload accounts
-    let mut ob = klend_client.fetch_obligation(obligation).await?;
+    let ob = klend_client.fetch_obligation(obligation).await?;
     let market_accs = klend_client
         .fetch_market_and_reserves(&ob.lending_market)
         .await?;
 
-    let mut reserves = market_accs.reserves;
+    let reserves = market_accs.reserves;
     let market = market_accs.lending_market;
     // todo - don't load all
     let rts = klend_client.fetch_referrer_token_states().await?;
@@ -735,7 +735,7 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
         info!("[Liquidation Thread] Liquidating obligation start: pubkey: {}, obligation: {}, slot: {}", address.to_string().green(), obligation.to_string().green(), clock.slot);
 
         let liquidate_start = std::time::Instant::now();
-        match liquidate(klend_client, address, true).await {
+        match liquidate_with_loaded_data(klend_client, address, clock.clone(), obligation, reserves.clone(), *lending_market, rts.clone()).await {
             Ok(_) => {
                 info!("[Liquidation Thread] Liquidated obligation finished: {} success", address.to_string().green());
             }
