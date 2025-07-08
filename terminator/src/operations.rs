@@ -190,12 +190,17 @@ pub async fn refresh_reserves_and_obligation(
     referrer_token_states: &HashMap<Pubkey, ReferrerTokenState>,
     lending_market: &LendingMarket,
     clock: &Clock,
-) -> Result<()> {
+) -> Result<Vec<Pubkey>> {
     let OracleAccounts {
         mut pyth_accounts,
         mut switchboard_accounts,
         mut scope_price_accounts,
     } = oracle_accounts(&klend_client.client, reserves).await?;
+
+    let all_oracle_keys = pyth_accounts.iter().map(|(k, _, _)| *k)
+        .chain(switchboard_accounts.iter().map(|(k, _, _)| *k))
+        .chain(scope_price_accounts.iter().map(|(k, _, _)| *k))
+        .collect::<Vec<Pubkey>>();
 
     let pyth_account_infos = map_accounts_and_create_infos(&mut pyth_accounts);
     let switchboard_feed_infos = map_accounts_and_create_infos(&mut switchboard_accounts);
@@ -256,7 +261,7 @@ pub async fn refresh_reserves_and_obligation(
         borrow_reserves.into_iter(),
         referrer_states.into_iter(),
     )?;
-    Ok(())
+    Ok(all_oracle_keys)
 }
 
 pub fn referrer_token_states_of_obligation(

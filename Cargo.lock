@@ -2202,6 +2202,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0206175f82b8d6bf6652ff7d71a1e27fd2e4efde587fd368662814d6ec1d9ce0"
 
 [[package]]
+name = "extra-proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-types",
+ "tonic",
+ "tonic-build",
+]
+
+[[package]]
 name = "farms"
 version = "0.1.0"
 source = "git+https://github.com/Kamino-Finance/kfarms#23da54c9f1433257351242c964f9806cb16fa205"
@@ -3064,6 +3074,7 @@ dependencies = [
  "colored",
  "derive_builder 0.12.0",
  "dotenvy",
+ "extra-proto",
  "farms",
  "fixed",
  "futures",

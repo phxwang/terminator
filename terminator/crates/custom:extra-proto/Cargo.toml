@@ -1,0 +1,14 @@
+# 和solana-ext通讯
+[package]
+name = "extra-proto"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+prost = "~0.12"
+prost-types = "~0.12"
+tonic = "~0.10"
+
+[build-dependencies]
+tonic-build = "~0.10"

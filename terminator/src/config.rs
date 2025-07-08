@@ -10,6 +10,8 @@ use solana_sdk::{
     signature::{read_keypair_file, Keypair},
 };
 use static_pubkey::static_pubkey;
+use extra_proto::extra_client::ExtraClient;
+use yellowstone_grpc_proto::tonic::transport;
 
 use crate::{
     client::{KlendClient, RebalanceConfig},
@@ -57,7 +59,30 @@ pub async fn get_lending_markets(program_id: &Pubkey) -> Result<Vec<Pubkey>> {
     Ok(markets)
 }
 
-pub fn get_client_for_action(args: &Args) -> Result<KlendClient> {
+// 根据entry生成tonic-channel
+pub async fn generate_channel(
+    entry: impl Into<String>, // 连接目标
+    _ip: Option<std::net::Ipv4Addr>, // IP parameter kept for API compatibility but not used in simplified version
+) -> Result<transport::Channel> {
+    let entry = entry.into();
+
+    // Simplified channel creation using basic tonic functionality
+    let channel = transport::Channel::from_shared(entry)?
+        .tcp_nodelay(true)
+        .tcp_keepalive(Some(Duration::from_secs(1)))
+        .http2_keep_alive_interval(Duration::from_secs(1))
+        .keep_alive_timeout(Duration::from_secs(10))
+        .keep_alive_while_idle(true)
+        .initial_connection_window_size(Some(8 * 1024 * 1024))
+        .initial_stream_window_size(Some(4 * 1024 * 1024))
+        .buffer_size(64 * 1024)
+        .connect()
+        .await?;
+
+    Ok(channel)
+}
+
+pub async fn get_client_for_action(args: &Args) -> Result<KlendClient> {
     let (payer, placeholder) = get_keypair_for_action(&args.keypair)?;
     let commitment = CommitmentConfig::processed();
     let rpc = RpcClient::new_with_timeout_and_commitment(
@@ -76,10 +101,36 @@ pub fn get_client_for_action(args: &Args) -> Result<KlendClient> {
     let (local_payer, placeholder) = get_keypair_for_action(&args.keypair)?;
     let local_orbit_link: OrbitLink<RpcClient, Keypair> =
         OrbitLink::new(local_rpc, local_payer, None, commitment, placeholder)?;
+
+    // Create ExtraClient - for now create a dummy one, this should be configured properly based on requirements
+    /*let extra_client = {
+        // Try to get EXTRA environment variable, use a default if not present
+        let extra_url = env::var("EXTRA").unwrap_or_else(|_| "http://localhost:50051".to_string());
+
+        // Create a channel and ExtraClient
+        // Note: This is a simplified version. In production, you might want proper error handling
+        // and configuration for the channel
+        let channel = tonic::transport::Channel::from_shared(extra_url)
+            .map_err(|e| anyhow!("Failed to create channel: {}", e))?
+            .connect()
+            .await
+            .map_err(|e| anyhow!("Failed to connect to extra service: {}", e))?;
+
+        ExtraClient::new(channel)
+    };*/
+
+    // 自建服务，用于模拟交易
+    let extra = args.extra.clone();
+    log::info!("extra: {}", extra);
+    let channel = generate_channel(extra, None)
+        .await.expect("fail to generate channel");
+    let extra_client = ExtraClient::new(channel);
+
     let rebalance_config = get_rebalance_config_for_action(&args.action);
     let klend_client = KlendClient::init(
         orbit_link,
         local_orbit_link,
+        extra_client,
         args.klend_program_id.unwrap_or(kamino_lending::id()),
         rebalance_config,
     )?;

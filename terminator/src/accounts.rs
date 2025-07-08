@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::str::FromStr;
 
 use anchor_client::{
@@ -25,7 +25,9 @@ use spl_associated_token_account::instruction::create_associated_token_account;
 use tracing::{info, debug, error};
 use yellowstone_grpc_proto::prelude::{SubscribeRequest, SubscribeRequestFilterAccounts, SubscribeRequestFilterTransactions, subscribe_update::UpdateOneof};
 use yellowstone_grpc_proto::geyser::CommitmentLevel;
+use yellowstone_grpc_proto::tonic;
 use tokio::time::interval;
+use extra_proto::GetMultipleAccountsRequest;
 
 use crate::{
     client::{rpc, KlendClient},
@@ -158,6 +160,114 @@ pub async fn oracle_accounts<T: AsyncClient, S: Signer>(
             }
             if scope_keys.contains(key) {
                 scope_price_accounts.push(account_tuple.clone());
+            }
+        }
+    }
+
+    Ok(OracleAccounts {
+        pyth_accounts,
+        switchboard_accounts,
+        scope_price_accounts,
+    })
+}
+
+pub async fn dump_accounts_to_file(
+    extra_client: &mut extra_proto::extra_client::ExtraClient<tonic::transport::Channel>,
+    dump_account_pubkeys: &Vec<Pubkey>,
+    slot: u64,
+) -> Result<()> {
+    let request = GetMultipleAccountsRequest {
+        addresses: dump_account_pubkeys.iter()
+            .map(|address| address.to_bytes().to_vec())
+            .collect(),
+        commitment_or_slot: slot,
+    };
+    let response = extra_client.get_multiple_accounts(request).await?;
+    let accounts = response.into_inner();
+
+    let file_path = format!("./dump_data/{}.json", slot);
+    let file = File::create(file_path)?;
+    let mut writer = BufWriter::new(file);
+
+    for (i, account_data) in accounts.datas.iter().enumerate() {
+        let account_pubkey = dump_account_pubkeys[i];
+        let account_data_base64 = anchor_lang::__private::base64::encode(account_data);
+        writeln!(writer, "{}: {}", account_pubkey, account_data_base64)?;
+    }
+
+    Ok(())
+}
+
+pub async fn load_accounts_from_file(
+    file_path: &str,
+) -> Result<HashMap<Pubkey, Account>> {
+    let file = File::open(file_path)?;
+    let reader = BufReader::new(file);
+    let mut accounts = HashMap::new();
+    for line in reader.lines() {
+        let line = line?;
+        let (pubkey, data) = line.split_once(':').unwrap();
+        let pubkey = Pubkey::from_str(pubkey)?;
+        let data = anchor_lang::__private::base64::decode(data)?;
+        accounts.insert(pubkey, Account {
+            lamports: 0,
+            data: data,
+            owner: Pubkey::default(),
+            executable: false,
+            rent_epoch: 0,
+        });
+    }
+    Ok(accounts)
+}
+
+pub async fn oracle_accounts_from_extra(
+    extra_client: &mut extra_proto::extra_client::ExtraClient<tonic::transport::Channel>,
+    reserves: &HashMap<Pubkey, Reserve>,
+    slot: u64,
+) -> Result<OracleAccounts> {
+    let mut all_oracle_keys = HashSet::new();
+    let mut pyth_keys = HashSet::new();
+    let mut switchboard_keys = HashSet::new();
+    let mut scope_keys = HashSet::new();
+
+    refresh_oracle_keys(reserves, &mut all_oracle_keys, &mut pyth_keys, &mut switchboard_keys, &mut scope_keys);
+
+    let all_keys: Vec<Pubkey> = all_oracle_keys.into_iter().collect();
+
+    let response = extra_client.get_multiple_accounts(extra_proto::GetMultipleAccountsRequest {
+        addresses: all_keys.iter()
+            .map(|address| address.to_bytes().to_vec())
+            .collect(),
+        commitment_or_slot: slot,
+    }).await?;
+
+    let accounts = response.into_inner();
+
+    let mut pyth_accounts = Vec::new();
+    let mut switchboard_accounts = Vec::new();
+    let mut scope_price_accounts = Vec::new();
+
+    for (i, key) in all_keys.iter().enumerate() {
+        if let Some(account_data) = accounts.datas.get(i) {
+            if !account_data.is_empty() {
+                let account = Account {
+                    lamports: accounts.balances.get(i).copied().unwrap_or(0),
+                    data: account_data.clone(),
+                    owner: Pubkey::default(), // We don't have owner info from the response
+                    executable: false, // We don't have executable info from the response
+                    rent_epoch: 0, // We don't have rent_epoch info from the response
+                };
+                let account_tuple = (*key, false, account);
+
+                if pyth_keys.contains(key) {
+                    pyth_accounts.push(account_tuple.clone());
+                }
+                if switchboard_keys.contains(key) {
+                    switchboard_accounts.push(account_tuple.clone());
+                }
+                if scope_keys.contains(key) {
+                    scope_price_accounts.push(account_tuple.clone());
+                }
             }
         }
     }

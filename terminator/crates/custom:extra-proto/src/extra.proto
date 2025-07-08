@@ -1,0 +1,114 @@
+syntax = "proto3";
+
+package extra;
+import "google/protobuf/empty.proto";
+import "google/protobuf/wrappers.proto";
+
+service Extra {
+    rpc ObserveTransaction(ObserveTransactionRequest) returns (stream TransactionObservation);
+    rpc ObserveBlock(google.protobuf.Empty) returns (stream BlockObservation);
+    rpc GetMultipleAccounts(GetMultipleAccountsRequest) returns (GetMultipleAccountsResponse);
+    rpc SimulateTransaction(SimulateTransactionRequest) returns (SimulateTransactionResponse);
+    rpc GetClusterNodes(google.protobuf.Empty) returns (GetClusterNodesResponse);
+    rpc GetBlockhashes(GetBlockhashesRequest) returns (GetBlockhashesResponse);
+}
+
+enum Commitment {
+    WORKING = 0;
+    PROCESSED = 1;
+    CONFIRMED = 2;
+    FINALIZED = 3;
+}
+message Blockhash {
+    uint64 slot = 1; // 所在slot
+    bytes hash = 2; // blockhash
+}
+
+message ObserveTransactionRequest {
+    repeated bytes addresses = 1; // 涉及地址列表
+    // bool succ_only = 2; // 仅观察成功交易
+    // bool include_logs = 3; // 是否包含日志
+}
+message TransactionObservation {
+    uint64 millis_since_epoch = 1; // 时间戳
+    uint64 slot = 2; // 所在slot
+    uint32 index = 3; // slot中位置
+    string signature = 4; // tx签名，注意：此处为字符串
+    google.protobuf.StringValue err = 5; // 错误信息，空表示成功；注意：此处会被翻译为Option<String>
+    repeated bytes addresses = 6; // tx中涉及地址
+    repeated TransactionInstruction instructions = 7; // tx中指令
+    repeated uint64 pre_balances = 8; // 执行前余额
+    repeated uint64 post_balances = 9; // 执行后余额
+    // bool is_vote = 10; // 是否为简单投票
+}
+message TransactionInstruction {
+    uint32 program_index = 1; // program
+    repeated uint32 account_indexes = 2; // 地址
+    bytes data = 3; // 数据
+}
+
+message BlockObservation {
+    uint64 slot = 1; // 更新slot
+    repeated Blockhash blockhashes = 2; // blockhash列表
+    uint64 finalized = 3; // 已经finalized的slot
+}
+
+message GetMultipleAccountsRequest {
+    repeated bytes addresses = 1; // 目标地址列表
+    uint64 commitment_or_slot = 2; // 较小为commitment，其他为slot
+}
+message GetMultipleAccountsResponse {
+    uint64 slot = 1; // 所在slot
+    repeated bytes datas = 2; // 目标地址数据，空数组表示不存在
+    repeated uint64 balances = 3; // 目标地址余额，0表示不存在
+}
+
+message Replace {
+    bytes address = 1; // 地址
+    bytes data = 2; // 数据
+}
+// message Elapse {
+//     string name = 1;
+//     uint64 micros = 2;
+// }
+// message BytesWrapper {
+//     bytes value = 1;
+// }
+message SimulateTransactionRequest {
+    bytes data = 1; // tx数据
+    repeated Replace replaces = 2; // 账户覆盖
+    repeated bytes addresses = 3; // 目标地址列表
+    uint64 commitment_or_slot = 4; // 较小为commitment，其他为slot
+}
+message SimulateTransactionResponse {
+    uint64 slot = 1; // 所在slot
+    google.protobuf.StringValue err = 2; // 错误信息，空表示成功；注意：此处会被翻译为Option<String>
+    uint64 consumed = 3; // 消耗compute-unit
+    repeated string logs = 4; // tx日志
+    repeated bytes datas = 5; // 目标地址数据，空表示不存在；注意：各种尝试都无法实现Vec<Option<Vec<u8>>>
+    // repeated BytesWrapper datas = 5; // 会被翻译为Vec<BytesWrapper>
+    // repeated google.protobuf.BytesValue datas = 5; // 会被翻译为Vec<Vec<u8>>
+    // repeated Elapse elapses = 6; // 每个阶段执行耗时
+}
+
+message ClusterNode {
+    bytes pubkey = 1; // 节点puzbkey
+    string gossip = 2; // gossip地址，一定存在
+    google.protobuf.StringValue version = 3; // 节点版本，允许为空
+    google.protobuf.StringValue tpu = 4; // tpu-quic地址，允许为空
+    google.protobuf.StringValue forward = 5; // foward-quic地址，允许为空
+    // google.protobuf.StringValue tvu_udp = 6;
+    // google.protobuf.StringValue tvu_quic = 7;
+}
+message GetClusterNodesResponse {
+    uint32 shred_version = 1;
+    repeated ClusterNode nodes = 2;
+}
+
+message GetBlockhashesRequest {
+    uint64 commitment_or_slot = 1; // 较小为commitment，其他为slot
+}
+message GetBlockhashesResponse {
+    uint64 slot = 1; // 所在slot
+    repeated Blockhash blockhashes = 2; // blockhash列表
+}

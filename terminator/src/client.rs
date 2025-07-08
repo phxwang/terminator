@@ -29,20 +29,27 @@ use solana_sdk::{
     instruction::Instruction,
     signature::{Keypair, Signature},
     transaction::{TransactionError, VersionedTransaction},
+    account::Account,
+    sysvar::{self, clock::Clock},
 };
 use tokio::task;
 use tracing::info;
+use anchor_lang::AccountDeserialize;
+use extra_proto::GetMultipleAccountsRequest;
 
 use crate::{
-    accounts::{find_account, market_and_reserve_accounts, MarketAccounts},
+    accounts::{find_account, market_and_reserve_accounts, oracle_accounts_from_extra, map_accounts_and_create_infos, MarketAccounts, OracleAccounts},
     consts::{NULL_PUBKEY, WRAPPED_SOL_MINT},
     instructions::{self, InstructionBlocks},
     liquidator::Liquidator,
     lookup_tables::collect_keys,
     model::StateWithKey,
+    operations::{refresh_reserve, obligation_reserves, ObligationReserves, referrer_token_states_of_obligation},
     px,
     px::Prices,
 };
+use extra_proto::extra_client::ExtraClient;
+use yellowstone_grpc_proto::tonic;
 
 pub struct KlendClient {
     pub program_id: Pubkey,
@@ -50,6 +57,8 @@ pub struct KlendClient {
     pub client: OrbitLink<RpcClient, Keypair>,
 
     pub local_client: OrbitLink<RpcClient, Keypair>,
+
+    pub extra_client: ExtraClient<tonic::transport::Channel>,
 
     // Txn data
     pub lookup_table: Option<AddressLookupTableAccount>,
@@ -75,6 +84,7 @@ impl KlendClient {
     pub fn init(
         client: OrbitLink<RpcClient, Keypair>,
         local_client: OrbitLink<RpcClient, Keypair>,
+        extra_client: ExtraClient<tonic::transport::Channel>,
         program_id: Pubkey,
         rebalance_config: Option<RebalanceConfig>,
     ) -> Result<Self> {
@@ -88,6 +98,7 @@ impl KlendClient {
             program_id,
             client,
             local_client,
+            extra_client,
             lookup_table: None,
             liquidator,
             rebalance_config,
@@ -689,6 +700,121 @@ impl KlendClient {
         };
 
         (deposit_reserves, borrow_reserves, referrer_token_states)
+    }
+
+    pub async fn load_data_from_extra(&self, obligation: &Pubkey, slot: u64) -> Result<(Obligation, Clock, HashMap<Pubkey, Reserve>, LendingMarket, HashMap<Pubkey, ReferrerTokenState>)> {
+        // load data from extra
+        info!("Loading data from extra for obligation {:?}, slot {:?}", obligation, slot);
+
+        let account_keys = vec![
+            obligation.to_bytes().to_vec(),
+            sysvar::clock::ID.to_bytes().to_vec(),
+        ];
+
+        let mut extra_client = self.extra_client.clone();
+        let request = GetMultipleAccountsRequest {
+            addresses: account_keys.iter()
+                .map(|address: &Vec<u8>| address.clone())
+                .collect(),
+            commitment_or_slot: slot,
+        };
+        info!("Request: {:?}", request);
+        let response = extra_client.get_multiple_accounts(request).await?;
+
+        let accounts = response.into_inner();
+        let obligation_data = accounts.datas.get(0).unwrap().clone();
+        let clock_data = accounts.datas.get(1).unwrap().clone();
+
+        // Deserialize the obligation and clock data
+        let mut obligation_state: Obligation = Obligation::try_deserialize(&mut obligation_data.as_slice())?;
+
+        // Create a mock Account for Clock deserialization
+        let clock_account = Account {
+            lamports: 0,
+            data: clock_data,
+            owner: sysvar::clock::ID,
+            executable: false,
+            rent_epoch: 0,
+        };
+        let clock: Clock = clock_account.deserialize_data()?;
+
+        info!("Loaded clock data from extra for obligation {:?}, clock {:?}", obligation_state, clock);
+
+        let market_accs = self.fetch_market_and_reserves(&obligation_state.lending_market).await?;
+
+        let mut reserves = market_accs.reserves;
+        let market = market_accs.lending_market;
+        // todo - don't load all
+        let rts = self.fetch_referrer_token_states().await?;
+
+        // load oracle accounts
+        let OracleAccounts {
+            mut pyth_accounts,
+            mut switchboard_accounts,
+            mut scope_price_accounts,
+        } = oracle_accounts_from_extra(&mut extra_client, &reserves, slot).await?;
+
+        let pyth_account_infos = map_accounts_and_create_infos(&mut pyth_accounts);
+        let switchboard_feed_infos = map_accounts_and_create_infos(&mut switchboard_accounts);
+        let scope_price_infos = map_accounts_and_create_infos(&mut scope_price_accounts);
+
+        let ObligationReserves {
+            borrow_reserves,
+            deposit_reserves,
+        } = obligation_reserves(&obligation_state, &reserves)?;
+
+        // Refresh reserves and obligation
+        for reserve in borrow_reserves.iter() {
+            refresh_reserve(
+                &reserve.key,
+                &mut reserve.state.borrow_mut(),
+                &market,
+                &clock,
+                &pyth_account_infos,
+                &switchboard_feed_infos,
+                &scope_price_infos,
+            )?;
+
+            // 同步更新的数据回原始的 reserves HashMap
+            reserves.insert(reserve.key, *reserve.state.borrow());
+
+            //info!("Borrow reserve: {:?}, last_update: {:?}", reserve.state.borrow().config.token_info.symbol(), reserve.state.borrow().last_update);
+        }
+
+        for reserve in deposit_reserves.iter() {
+            refresh_reserve(
+                &reserve.key,
+                &mut reserve.state.borrow_mut(),
+                &market,
+                &clock,
+                &pyth_account_infos,
+                &switchboard_feed_infos,
+                &scope_price_infos,
+            )?;
+
+            // 同步更新的数据回原始的 reserves HashMap
+            reserves.insert(reserve.key, *reserve.state.borrow());
+
+            //info!("Deposit reserve: {:?}, last_update: {:?}", reserve.state.borrow().config.token_info.symbol(), reserve.state.borrow().last_update);
+        }
+
+        let referrer_states = referrer_token_states_of_obligation(
+            obligation,
+            &obligation_state,
+            &borrow_reserves,
+            &rts,
+        )?;
+
+        kamino_lending::lending_market::lending_operations::refresh_obligation(
+            &mut obligation_state,
+            &market,
+            clock.slot,
+            deposit_reserves.into_iter(),
+            borrow_reserves.into_iter(),
+            referrer_states.into_iter(),
+        )?;
+
+        Ok((obligation_state, clock, reserves, market, rts))
     }
 }
 

@@ -11,6 +11,7 @@ use solana_sdk::{
     clock::Clock,
     compute_budget,
     account::Account,
+    sysvar::SysvarId,
 };
 use tokio::time::sleep;
 use tracing::{info, warn, debug, error};
@@ -18,8 +19,9 @@ use tracing_subscriber::{filter::EnvFilter, layer::SubscriberExt, util::Subscrib
 use solana_sdk::instruction::Instruction;
 use solana_sdk::address_lookup_table::AddressLookupTableAccount;
 
+
 use crate::{
-    accounts::{map_accounts_and_create_infos, oracle_accounts, OracleAccounts, MarketAccounts, account_update_ws},
+    accounts::{map_accounts_and_create_infos, oracle_accounts, OracleAccounts, MarketAccounts, account_update_ws, dump_accounts_to_file},
     client::KlendClient,
     config::get_lending_markets,
     jupiter::get_best_swap_instructions,
@@ -69,6 +71,10 @@ pub struct Args {
     /// Connect to solana validator
     #[clap(long, env, parse(try_from_str), default_value = "localnet")]
     local_cluster: Cluster,
+
+    /// Connect to custom extra service
+    #[clap(long, env, parse(try_from_str), default_value = "localnet")]
+    extra: String,
 
     /// Account keypair to pay for the transactions
     #[clap(long, env, parse(from_os_str))]
@@ -145,6 +151,10 @@ pub enum Actions {
         /// Obligation to be liquidated
         #[clap(long, env, parse(try_from_str))]
         obligation: Pubkey,
+
+        /// Slot to simulate
+        #[clap(long, env, parse(try_from_str))]
+        slot: Option<u64>,
 
         #[clap(flatten)]
         rebalance_args: RebalanceArgs,
@@ -236,7 +246,7 @@ async fn main() -> Result<()> {
     info!("Starting with {:#?}", args);
 
     info!("Initializing client..");
-    let mut klend_client = config::get_client_for_action(&args)?;
+    let mut klend_client = config::get_client_for_action(&args).await?;
 
     if klend_client.liquidator.atas.is_empty() {
         info!("Liquidator ATAs are empty, loading...");
@@ -257,8 +267,9 @@ async fn main() -> Result<()> {
         } => crank(&klend_client, obligation_filter).await,
         Actions::Liquidate {
             obligation,
+            slot,
             rebalance_args: _,
-        } => liquidate(&klend_client, &obligation, false).await,
+        } => liquidate(&klend_client, &obligation, slot).await,
         Actions::Swap {
             from,
             to,
@@ -370,31 +381,56 @@ pub mod swap {
     }
 }
 
-async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, _dont_refresh: bool) -> Result<()> {
-    info!("Liquidating obligation {}", obligation.to_string().green());
+async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, slot: Option<u64>) -> Result<()> {
+    info!("Liquidating obligation {}, slot: {:?}", obligation.to_string().green(), slot);
     debug!("Liquidator ATAs: {:?}", klend_client.liquidator.atas);
-    let _rebalance_config = match &klend_client.rebalance_config {
-        None => Err(anyhow::anyhow!("Rebalance settings not found")),
-        Some(c) => Ok(c),
-    }?;
 
     // Original refresh logic when dont_refresh is false
+
     info!("Performing full data refresh");
 
-    let clock = sysvars::clock(&klend_client.local_client.client).await?;
+    let (obligation_data, clock, reserves, market, rts) = match slot {
+        Some(slot) => {
+            // load data from extra
+            klend_client.load_data_from_extra(obligation, slot).await?
+        },
+        None => {
+            let clock = sysvars::clock(&klend_client.local_client.client).await?;
 
-    // Reload accounts
-    let ob = klend_client.fetch_obligation(obligation).await?;
-    let market_accs = klend_client
-        .fetch_market_and_reserves(&ob.lending_market)
-        .await?;
+            // Reload accounts
+            let mut ob = klend_client.fetch_obligation(obligation).await?;
+            let market_accs = klend_client
+                .fetch_market_and_reserves(&ob.lending_market)
+                .await?;
 
-    let reserves = market_accs.reserves;
-    let market = market_accs.lending_market;
-    // todo - don't load all
-    let rts = klend_client.fetch_referrer_token_states().await?;
+            let mut reserves = market_accs.reserves;
+            let market = market_accs.lending_market;
+            // todo - don't load all
+            let rts = klend_client.fetch_referrer_token_states().await?;
 
-    liquidate_with_loaded_data(klend_client, obligation, clock, ob, reserves, market, rts).await?;
+            let oracle_keys = operations::refresh_reserves_and_obligation(
+                klend_client,
+                obligation,
+                &mut ob,
+                &mut reserves,
+                &rts,
+                &market,
+                &clock,
+            )
+            .await?;
+
+            let mut to_dump_keys = Vec::new();
+            to_dump_keys.extend(oracle_keys);
+            to_dump_keys.push(Clock::id());
+            to_dump_keys.push(*obligation);
+
+            dump_accounts_to_file(&mut klend_client.extra_client.clone(), &to_dump_keys, clock.slot).await?;
+
+            (ob, clock, reserves, market, rts)
+        }
+    };
+
+    liquidate_with_loaded_data(klend_client, obligation, clock, obligation_data, reserves, market, rts).await?;
     Ok(())
 }
 
@@ -402,22 +438,12 @@ async fn liquidate_with_loaded_data(
     klend_client: &Arc<KlendClient>,
     obligation: &Pubkey,
     clock: Clock,
-    mut ob: Obligation,
-    mut reserves: HashMap<Pubkey, Reserve>,
+    ob: Obligation,
+    reserves: HashMap<Pubkey, Reserve>,
     market: LendingMarket,
-    rts: HashMap<Pubkey, ReferrerTokenState>
+    _rts: HashMap<Pubkey, ReferrerTokenState>
 ) -> Result<(), anyhow::Error> {
     info!("Liquidating: Obligation: {:?}", ob);
-    operations::refresh_reserves_and_obligation(
-        klend_client,
-        obligation,
-        &mut ob,
-        &mut reserves,
-        &rts,
-        &market,
-        &clock,
-    )
-    .await?;
     let debt_res_key = match ob.borrows.iter().find(|b| b.borrowed_amount_sf > 0) {
         Some(borrow) => borrow.borrow_reserve,
         None => {
@@ -1189,7 +1215,7 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
                     unhealthy_obligations += 1;
                     // TODO: liquidate
                     info!("Liquidating obligation begin: {} {}", address.to_string().green(), obligation.to_string().green());
-                    match liquidate(klend_client, address, true).await {
+                    match liquidate(klend_client, address, None).await {
                         Ok(_) => {
                             info!("Liquidated obligation success: {} {}", address.to_string().green(), obligation.to_string().green());
                         }
