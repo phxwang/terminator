@@ -17,6 +17,7 @@ use anchor_client::{
     },
     solana_sdk::pubkey::Pubkey,
 };
+use solana_sdk::account::Account;
 use anyhow::{anyhow, Result};
 use kamino_lending::{
     utils::seeds, LendingMarket, Obligation, ReferrerTokenState, Reserve, ReserveFarmKind,
@@ -29,16 +30,14 @@ use solana_sdk::{
     instruction::Instruction,
     signature::{Keypair, Signature},
     transaction::{TransactionError, VersionedTransaction},
-    account::Account,
-    sysvar::{self, clock::Clock},
+    sysvar::{clock::Clock, SysvarId},
 };
 use tokio::task;
 use tracing::info;
 use anchor_lang::AccountDeserialize;
-use extra_proto::GetMultipleAccountsRequest;
 
 use crate::{
-    accounts::{find_account, market_and_reserve_accounts, oracle_accounts_from_extra, map_accounts_and_create_infos, MarketAccounts, OracleAccounts},
+    accounts::{find_account, load_accounts_from_file, market_and_reserve_accounts, map_accounts_and_create_infos, MarketAccounts, refresh_oracle_keys},
     consts::{NULL_PUBKEY, WRAPPED_SOL_MINT},
     instructions::{self, InstructionBlocks},
     liquidator::Liquidator,
@@ -702,41 +701,17 @@ impl KlendClient {
         (deposit_reserves, borrow_reserves, referrer_token_states)
     }
 
-    pub async fn load_data_from_extra(&self, obligation: &Pubkey, slot: u64) -> Result<(Obligation, Clock, HashMap<Pubkey, Reserve>, LendingMarket, HashMap<Pubkey, ReferrerTokenState>)> {
+    pub async fn load_data_from_file(&self, obligation: &Pubkey, slot: u64)
+    -> anyhow::Result<(Obligation, Clock, HashMap<Pubkey, Reserve>, LendingMarket, HashMap<Pubkey, ReferrerTokenState>, HashMap<Pubkey, Account>)> {
         // load data from extra
         info!("Loading data from extra for obligation {:?}, slot {:?}", obligation, slot);
 
-        let account_keys = vec![
-            obligation.to_bytes().to_vec(),
-            sysvar::clock::ID.to_bytes().to_vec(),
-        ];
+        let accounts = load_accounts_from_file(slot).await?;
 
-        let mut extra_client = self.extra_client.clone();
-        let request = GetMultipleAccountsRequest {
-            addresses: account_keys.iter()
-                .map(|address: &Vec<u8>| address.clone())
-                .collect(),
-            commitment_or_slot: slot,
-        };
-        info!("Request: {:?}", request);
-        let response = extra_client.get_multiple_accounts(request).await?;
-
-        let accounts = response.into_inner();
-        let obligation_data = accounts.datas.get(0).unwrap().clone();
-        let clock_data = accounts.datas.get(1).unwrap().clone();
-
-        // Deserialize the obligation and clock data
-        let mut obligation_state: Obligation = Obligation::try_deserialize(&mut obligation_data.as_slice())?;
-
-        // Create a mock Account for Clock deserialization
-        let clock_account = Account {
-            lamports: 0,
-            data: clock_data,
-            owner: sysvar::clock::ID,
-            executable: false,
-            rent_epoch: 0,
-        };
-        let clock: Clock = clock_account.deserialize_data()?;
+        let obligation_account = accounts.get(obligation).unwrap();
+        let mut obligation_state = Obligation::try_deserialize(&mut obligation_account.data.as_slice())?;
+        let clock_account = accounts.get(&Clock::id()).unwrap();
+        let clock = clock_account.deserialize_data::<Clock>()?;
 
         info!("Loaded clock data from extra for obligation {:?}, clock {:?}", obligation_state, clock);
 
@@ -747,12 +722,29 @@ impl KlendClient {
         // todo - don't load all
         let rts = self.fetch_referrer_token_states().await?;
 
-        // load oracle accounts
-        let OracleAccounts {
-            mut pyth_accounts,
-            mut switchboard_accounts,
-            mut scope_price_accounts,
-        } = oracle_accounts_from_extra(&mut extra_client, &reserves, slot).await?;
+        let mut all_oracle_keys = HashSet::new();
+        let mut pyth_keys = HashSet::new();
+        let mut switchboard_keys = HashSet::new();
+        let mut scope_keys = HashSet::new();
+
+        refresh_oracle_keys(&reserves, &mut all_oracle_keys, &mut pyth_keys, &mut switchboard_keys, &mut scope_keys);
+
+        let mut pyth_accounts = Vec::new();
+        let mut switchboard_accounts = Vec::new();
+        let mut scope_price_accounts = Vec::new();
+
+        for pyth_key in pyth_keys {
+            let pyth_account = accounts.get(&pyth_key).unwrap();
+            pyth_accounts.push((pyth_key, false, pyth_account.clone()));
+        }
+        for switchboard_key in switchboard_keys {
+            let switchboard_account = accounts.get(&switchboard_key).unwrap();
+            switchboard_accounts.push((switchboard_key, false, switchboard_account.clone()));
+        }
+        for scope_key in scope_keys {
+            let scope_account = accounts.get(&scope_key).unwrap();
+            scope_price_accounts.push((scope_key, false, scope_account.clone()));
+        }
 
         let pyth_account_infos = map_accounts_and_create_infos(&mut pyth_accounts);
         let switchboard_feed_infos = map_accounts_and_create_infos(&mut switchboard_accounts);
@@ -814,7 +806,7 @@ impl KlendClient {
             referrer_states.into_iter(),
         )?;
 
-        Ok((obligation_state, clock, reserves, market, rts))
+        Ok((obligation_state, clock, reserves, market, rts, accounts))
     }
 }
 

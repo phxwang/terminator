@@ -199,8 +199,9 @@ pub async fn dump_accounts_to_file(
 }
 
 pub async fn load_accounts_from_file(
-    file_path: &str,
+    slot: u64
 ) -> Result<HashMap<Pubkey, Account>> {
+    let file_path = format!("./dump_data/{}.json", slot);
     let file = File::open(file_path)?;
     let reader = BufReader::new(file);
     let mut accounts = HashMap::new();

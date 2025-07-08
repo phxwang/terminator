@@ -18,6 +18,7 @@ use tracing::{info, warn, debug, error};
 use tracing_subscriber::{filter::EnvFilter, layer::SubscriberExt, util::SubscriberInitExt, fmt, Layer};
 use solana_sdk::instruction::Instruction;
 use solana_sdk::address_lookup_table::AddressLookupTableAccount;
+use extra_proto::{Replace, SimulateTransactionRequest};
 
 
 use crate::{
@@ -389,12 +390,13 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, slot: O
 
     info!("Performing full data refresh");
 
-    let (obligation_data, clock, reserves, market, rts) = match slot {
+    let (obligation_data, clock, reserves, market, rts, loaded_accounts_data) = match slot {
         Some(slot) => {
             // load data from extra
-            klend_client.load_data_from_extra(obligation, slot).await?
+            klend_client.load_data_from_file(obligation, slot).await?
         },
         None => {
+            let loaded_accounts_data: HashMap<Pubkey, Account> = HashMap::new();
             let clock = sysvars::clock(&klend_client.local_client.client).await?;
 
             // Reload accounts
@@ -426,11 +428,11 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, slot: O
 
             dump_accounts_to_file(&mut klend_client.extra_client.clone(), &to_dump_keys, clock.slot).await?;
 
-            (ob, clock, reserves, market, rts)
+            (ob, clock, reserves, market, rts, loaded_accounts_data)
         }
     };
 
-    liquidate_with_loaded_data(klend_client, obligation, clock, obligation_data, reserves, market, rts).await?;
+    liquidate_with_loaded_data(klend_client, obligation, clock, obligation_data, reserves, market, rts, Some(loaded_accounts_data)).await?;
     Ok(())
 }
 
@@ -441,7 +443,8 @@ async fn liquidate_with_loaded_data(
     ob: Obligation,
     reserves: HashMap<Pubkey, Reserve>,
     market: LendingMarket,
-    _rts: HashMap<Pubkey, ReferrerTokenState>
+    _rts: HashMap<Pubkey, ReferrerTokenState>,
+    _loaded_accounts_data: Option<HashMap<Pubkey, Account>>,
 ) -> Result<(), anyhow::Error> {
     info!("Liquidating: Obligation: {:?}", ob);
     let debt_res_key = match ob.borrows.iter().find(|b| b.borrowed_amount_sf > 0) {
@@ -522,7 +525,7 @@ async fn liquidate_with_loaded_data(
         deposit_reserves.into_iter(),
     );
     info!("Simulating the Liquidating {:#?}", res);
-    Ok(if res.is_ok() {
+    if res.is_ok() {
         let total_withdraw_liquidity_amount = match res {
             Ok(result) => result.total_withdraw_liquidity_amount,
             Err(_) => {
@@ -678,35 +681,76 @@ async fn liquidate_with_loaded_data(
             info!("Liquidating: Instruction: {:?} {:?}", ix.program_id, ix.data);
         }
 
-        match klend_client
-            .local_client
-            .client
-            .simulate_transaction(&txn)
-            .await
-            {
-                Ok(res) => {
-                    info!("Liquidating: Simulation result: {:?}", res);
+        match _loaded_accounts_data {
+            Some(loaded_accounts_data) => {
+                info!("Liquidating with extra client");
+
+                let mut replaces = vec![];
+                for (key, account) in loaded_accounts_data.iter() {
+                    replaces.push(Replace {
+                        address: key.to_bytes().to_vec(),
+                        data: account.data.to_vec(),
+                    });
                 }
-                Err(e) => {
-                    error!("Liquidating: Simulation error: {:?}", e);
+
+                let mut extra_client = klend_client.extra_client.clone();
+                match extra_client.simulate_transaction(SimulateTransactionRequest {
+                    data: serde_json::to_vec(&txn).unwrap(),
+                    replaces: replaces,
+                    commitment_or_slot: clock.slot,
+                    addresses: vec![obligation.key.to_bytes().to_vec()],
+                }).await {
+                    Ok(response) => {
+                        let response = response.into_inner();
+                        if let Some(err) = response.err {
+                            error!("Transaction simulation failed: {}", err);
+                        } else {
+                            info!("Transaction simulation succeeded");
+                            if !response.datas.is_empty() {
+                                info!("Response data length: {}", response.datas[0].len());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to simulate transaction: {}", e);
+                    }
                 }
             }
+            None => {
+                info!("Liquidating with normal client");
+
+                match klend_client
+                .local_client
+                .client
+                .simulate_transaction(&txn)
+                .await
+                {
+                    Ok(res) => {
+                        info!("Liquidating: Simulation result: {:?}", res);
+                    }
+                    Err(e) => {
+                        error!("Liquidating: Simulation error: {:?}", e);
+                    }
+                };
 
 
-        match klend_client
-            .local_client
-            .send_retry_and_confirm_transaction(txn, None, false)
-            .await
-            {
-                Ok(sig) => {
-                    info!("Liquidating: tx sent: {:?}", sig.0);
-                    info!("Liquidating: tx res: {:?}", sig.1);
-                }
-                Err(e) => {
-                    error!("Liquidating: tx error: {:?}", e);
-                }
+                match klend_client
+                    .local_client
+                    .send_retry_and_confirm_transaction(txn, None, false)
+                    .await
+                    {
+                        Ok(sig) => {
+                            info!("Liquidating: tx sent: {:?}", sig.0);
+                            info!("Liquidating: tx res: {:?}", sig.1);
+                        }
+                        Err(e) => {
+                            error!("Liquidating: tx error: {:?}", e);
+                        }
+                    };
             }
-    })
+        }
+    }
+    Ok(())
 }
 
 async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, mut obligation: Obligation, lending_market: &LendingMarket, clock: &Clock, reserves: &HashMap<Pubkey, Reserve>, rts: &HashMap<Pubkey, ReferrerTokenState>) -> Result<()> {
@@ -761,7 +805,7 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
         info!("[Liquidation Thread] Liquidating obligation start: pubkey: {}, obligation: {}, slot: {}", address.to_string().green(), obligation.to_string().green(), clock.slot);
 
         let liquidate_start = std::time::Instant::now();
-        match liquidate_with_loaded_data(klend_client, address, clock.clone(), obligation, reserves.clone(), *lending_market, rts.clone()).await {
+        match liquidate_with_loaded_data(klend_client, address, clock.clone(), obligation, reserves.clone(), *lending_market, rts.clone(), None).await {
             Ok(_) => {
                 info!("[Liquidation Thread] Liquidated obligation finished: {} success", address.to_string().green());
             }
