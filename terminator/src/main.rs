@@ -872,7 +872,7 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
 async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, obligation_map: &mut HashMap<Pubkey, Obligation>, market_accounts_map: &mut HashMap<Pubkey, (HashMap<Pubkey, Reserve>, LendingMarket, HashMap<Pubkey, ReferrerTokenState>)>) -> Result<()> {
     let start = std::time::Instant::now();
 
-    let obligations_map = match load_obligations_map(scope.clone()).await {
+    let mut obligations_map = match load_obligations_map(scope.clone()).await {
         Ok(value) => value,
         Err(value) => return value,
     };
@@ -893,7 +893,7 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
     debug!("Refreshing market clock time used: {}s", en_clock);
 
 
-    for (market, liquidatable_obligations) in obligations_map.iter() {
+    for (market, liquidatable_obligations) in obligations_map.iter_mut() {
         info!("[Liquidation Thread]{}: {} liquidatable obligations found", market.to_string().green(), liquidatable_obligations.len());
         total_liquidatable_obligations += liquidatable_obligations.len();
 
@@ -944,7 +944,7 @@ async fn scan_obligations(
     klend_client: &Arc<KlendClient>,
     obligation_map: &mut HashMap<Pubkey, Obligation>,
     obligation_reservers_to_refresh: &mut Vec<Pubkey>,
-    clock: &Clock, liquidatable_obligations: &Vec<Pubkey>,
+    clock: &Clock, liquidatable_obligations: &mut Vec<Pubkey>,
     reserves: &HashMap<Pubkey, Reserve>,
     lending_market: &LendingMarket,
     rts: &HashMap<Pubkey, ReferrerTokenState>,
@@ -990,6 +990,21 @@ async fn scan_obligations(
         let en = start.elapsed().as_secs_f64();
         debug!("[Liquidation Thread] Processed obligation time used: {} in {}s", address.to_string().green(), en);
     }
+
+    //根据obligation的borrow_factor_adjusted_debt_value_sf/unhealthy_borrow_value_sf对liquidatable_obligations进行排序, 值越大越靠前
+    liquidatable_obligations.sort_by(|a, b| {
+        let a_obligation = obligation_map.get(a).unwrap();
+        let b_obligation = obligation_map.get(b).unwrap();
+        let a_borrow_factor_adjusted_debt_value_sf = a_obligation.borrow_factor_adjusted_debt_value_sf as f64;
+        let b_borrow_factor_adjusted_debt_value_sf = b_obligation.borrow_factor_adjusted_debt_value_sf as f64;
+        let a_unhealthy_borrow_value_sf = a_obligation.unhealthy_borrow_value_sf as f64;
+        let b_unhealthy_borrow_value_sf = b_obligation.unhealthy_borrow_value_sf as f64;
+        let a_ratio = a_borrow_factor_adjusted_debt_value_sf / a_unhealthy_borrow_value_sf;
+        let b_ratio = b_borrow_factor_adjusted_debt_value_sf / b_unhealthy_borrow_value_sf;
+        a_ratio.partial_cmp(&b_ratio).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+
     checked_obligation_count
 }
 

@@ -648,14 +648,14 @@ pub async fn account_update_ws(
                                 ).await;
 
                             //scan obligations
-                            let obligations = market_obligations_map.get(market_pubkey).unwrap();
+                            let obligations = market_obligations_map.get_mut(market_pubkey).unwrap();
 
                             let mut obligation_map_write = obligation_map.write().unwrap();
                             let checked_obligation_count = scan_obligations(klend_client,
                                 &mut obligation_map_write,
                                 &mut obligation_reservers_to_refresh,
                                 &clock,
-                                &obligations,
+                                obligations,
                                 all_reserves,
                                 all_lending_market.get(market_pubkey).unwrap(),
                                 all_rts.get(market_pubkey).unwrap(),
