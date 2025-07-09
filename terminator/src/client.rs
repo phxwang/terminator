@@ -702,11 +702,11 @@ impl KlendClient {
     }
 
     pub async fn load_data_from_file(&self, obligation: &Pubkey, slot: u64)
-    -> anyhow::Result<(Obligation, Clock, HashMap<Pubkey, Reserve>, LendingMarket, HashMap<Pubkey, ReferrerTokenState>, HashMap<Pubkey, Account>)> {
+    -> anyhow::Result<(Obligation, Clock, HashMap<Pubkey, Reserve>, LendingMarket, HashMap<Pubkey, ReferrerTokenState>, Option<HashMap<Pubkey, Account>>)> {
         // load data from extra
         info!("Loading data from extra for obligation {:?}, slot {:?}", obligation, slot);
 
-        let accounts = load_accounts_from_file(slot).await?;
+        let (accounts, reserve_pubkeys) = load_accounts_from_file(slot).await?;
 
         let obligation_account = accounts.get(obligation).unwrap();
         let mut obligation_state = Obligation::try_deserialize(&mut obligation_account.data.as_slice())?;
@@ -715,10 +715,18 @@ impl KlendClient {
 
         info!("Loaded clock data from extra for obligation {:?}, clock {:?}", obligation_state, clock);
 
-        let market_accs = self.fetch_market_and_reserves(&obligation_state.lending_market).await?;
+        let market_account = accounts.get(&obligation_state.lending_market).unwrap();
+        let market = LendingMarket::try_deserialize(&mut market_account.data.as_slice())?;
 
-        let mut reserves = market_accs.reserves;
-        let market = market_accs.lending_market;
+        info!("Loaded market data from extra for market {:?}", market);
+
+        let mut reserves = HashMap::new();
+        for reserve_pubkey in reserve_pubkeys {
+            let reserve_account = accounts.get(&reserve_pubkey).unwrap();
+            let reserve = Reserve::try_deserialize(&mut reserve_account.data.as_slice())?;
+            reserves.insert(reserve_pubkey, reserve);
+        }
+
         // todo - don't load all
         let rts = self.fetch_referrer_token_states().await?;
 
@@ -806,7 +814,7 @@ impl KlendClient {
             referrer_states.into_iter(),
         )?;
 
-        Ok((obligation_state, clock, reserves, market, rts, accounts))
+        Ok((obligation_state, clock, reserves, market, rts, Some(accounts)))
     }
 }
 

@@ -396,7 +396,6 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, slot: O
             klend_client.load_data_from_file(obligation, slot).await?
         },
         None => {
-            let loaded_accounts_data: HashMap<Pubkey, Account> = HashMap::new();
             let clock = sysvars::clock(&klend_client.local_client.client).await?;
 
             // Reload accounts
@@ -421,18 +420,30 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, slot: O
             )
             .await?;
 
+            let ObligationReserves {
+                borrow_reserves,
+                deposit_reserves,
+            } = obligation_reserves(&ob, &reserves)?;
+
+            let mut obligation_reserve_keys = Vec::new();
+            obligation_reserve_keys.extend(borrow_reserves.iter().map(|b| b.key).collect::<Vec<_>>());
+            obligation_reserve_keys.extend(deposit_reserves.iter().map(|d| d.key).collect::<Vec<_>>());
+
             let mut to_dump_keys = Vec::new();
             to_dump_keys.extend(oracle_keys);
             to_dump_keys.push(Clock::id());
             to_dump_keys.push(*obligation);
+            to_dump_keys.push(ob.lending_market);
+            to_dump_keys.extend(obligation_reserve_keys.clone());
 
-            dump_accounts_to_file(&mut klend_client.extra_client.clone(), &to_dump_keys, clock.slot).await?;
+            dump_accounts_to_file(&mut klend_client.extra_client.clone(), &to_dump_keys, clock.slot, &obligation_reserve_keys).await?;
 
-            (ob, clock, reserves, market, rts, loaded_accounts_data)
+            (ob, clock, reserves, market, rts, None)
         }
     };
 
-    liquidate_with_loaded_data(klend_client, obligation, clock, obligation_data, reserves, market, rts, Some(loaded_accounts_data)).await?;
+    liquidate_with_loaded_data(klend_client, obligation, clock, obligation_data, reserves, market, rts, loaded_accounts_data).await?;
+
     Ok(())
 }
 
@@ -444,7 +455,7 @@ async fn liquidate_with_loaded_data(
     reserves: HashMap<Pubkey, Reserve>,
     market: LendingMarket,
     _rts: HashMap<Pubkey, ReferrerTokenState>,
-    _loaded_accounts_data: Option<HashMap<Pubkey, Account>>,
+    loaded_accounts_data: Option<HashMap<Pubkey, Account>>,
 ) -> Result<(), anyhow::Error> {
     info!("Liquidating: Obligation: {:?}", ob);
     let debt_res_key = match ob.borrows.iter().find(|b| b.borrowed_amount_sf > 0) {
@@ -675,13 +686,14 @@ async fn liquidate_with_loaded_data(
             }
         };
 
-        info!("Liquidating: txn.message.address_table_lookups: {:?}", txn.message.address_table_lookups());
-
         for ix in ixns {
             info!("Liquidating: Instruction: {:?} {:?}", ix.program_id, ix.data);
         }
 
-        match _loaded_accounts_data {
+        info!("Liquidating: txn.message.address_table_lookups: {:?}", txn.message.address_table_lookups());
+
+
+        match loaded_accounts_data {
             Some(loaded_accounts_data) => {
                 info!("Liquidating with extra client");
 
@@ -693,13 +705,21 @@ async fn liquidate_with_loaded_data(
                     });
                 }
 
+                info!("Liquidating: replaces count: {:?}", replaces.len());
+
                 let mut extra_client = klend_client.extra_client.clone();
-                match extra_client.simulate_transaction(SimulateTransactionRequest {
+
+                let request = SimulateTransactionRequest {
                     data: serde_json::to_vec(&txn).unwrap(),
                     replaces: replaces,
                     commitment_or_slot: clock.slot,
                     addresses: vec![obligation.key.to_bytes().to_vec()],
-                }).await {
+                };
+
+                info!("Liquidating: request data length: {:?}", request.data.len());
+                //info!("Liquidating: request data: {:?}", request);
+
+                match extra_client.simulate_transaction(request).await {
                     Ok(response) => {
                         let response = response.into_inner();
                         if let Some(err) = response.err {

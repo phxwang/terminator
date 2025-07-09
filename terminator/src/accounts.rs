@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter};
 use std::str::FromStr;
 
 use anchor_client::{
@@ -169,56 +169,6 @@ pub async fn oracle_accounts<T: AsyncClient, S: Signer>(
         switchboard_accounts,
         scope_price_accounts,
     })
-}
-
-pub async fn dump_accounts_to_file(
-    extra_client: &mut extra_proto::extra_client::ExtraClient<tonic::transport::Channel>,
-    dump_account_pubkeys: &Vec<Pubkey>,
-    slot: u64,
-) -> Result<()> {
-    let request = GetMultipleAccountsRequest {
-        addresses: dump_account_pubkeys.iter()
-            .map(|address| address.to_bytes().to_vec())
-            .collect(),
-        commitment_or_slot: slot,
-    };
-    let response = extra_client.get_multiple_accounts(request).await?;
-    let accounts = response.into_inner();
-
-    let file_path = format!("./dump_data/{}.json", slot);
-    let file = File::create(file_path)?;
-    let mut writer = BufWriter::new(file);
-
-    for (i, account_data) in accounts.datas.iter().enumerate() {
-        let account_pubkey = dump_account_pubkeys[i];
-        let account_data_base64 = anchor_lang::__private::base64::encode(account_data);
-        writeln!(writer, "{}: {}", account_pubkey, account_data_base64)?;
-    }
-
-    Ok(())
-}
-
-pub async fn load_accounts_from_file(
-    slot: u64
-) -> Result<HashMap<Pubkey, Account>> {
-    let file_path = format!("./dump_data/{}.json", slot);
-    let file = File::open(file_path)?;
-    let reader = BufReader::new(file);
-    let mut accounts = HashMap::new();
-    for line in reader.lines() {
-        let line = line?;
-        let (pubkey, data) = line.split_once(':').unwrap();
-        let pubkey = Pubkey::from_str(pubkey)?;
-        let data = anchor_lang::__private::base64::decode(data)?;
-        accounts.insert(pubkey, Account {
-            lamports: 0,
-            data: data,
-            owner: Pubkey::default(),
-            executable: false,
-            rent_epoch: 0,
-        });
-    }
-    Ok(accounts)
 }
 
 pub async fn oracle_accounts_from_extra(
@@ -404,6 +354,73 @@ pub async fn find_accounts(
         }
     }
     Ok(accounts)
+}
+
+pub async fn dump_accounts_to_file(
+    extra_client: &mut extra_proto::extra_client::ExtraClient<tonic::transport::Channel>,
+    dump_account_pubkeys: &Vec<Pubkey>,
+    slot: u64,
+    reserve_pubkeys: &Vec<Pubkey>,
+) -> Result<()> {
+    let request = GetMultipleAccountsRequest {
+        addresses: dump_account_pubkeys.iter()
+            .map(|address| address.to_bytes().to_vec())
+            .collect(),
+        commitment_or_slot: slot,
+    };
+    let response = extra_client.get_multiple_accounts(request).await?;
+    let accounts = response.into_inner();
+
+    let file_path = format!("./dump_data/{}.json", slot);
+    let file = File::create(file_path.clone())?;
+    let mut writer = BufWriter::new(file);
+
+
+    let mut json_map = serde_json::Map::new();
+    for (i, account_data) in accounts.datas.iter().enumerate() {
+        let account_pubkey = dump_account_pubkeys[i];
+        let account_data_array: Vec<u8> = account_data.iter().copied().collect();
+        json_map.insert(account_pubkey.to_string(), serde_json::Value::Array(
+            account_data_array.iter().map(|b| serde_json::Value::Number(serde_json::Number::from(*b))).collect()
+        ));
+    }
+
+    let mut json_array = vec![];
+    json_array.push(serde_json::Value::Object(json_map));
+    json_array.push(serde_json::Value::Array(reserve_pubkeys.iter().map(|key| serde_json::Value::String(key.to_string())).collect::<Vec<serde_json::Value>>()));
+
+    let json_array = serde_json::Value::Array(json_array);
+    serde_json::to_writer_pretty(&mut writer, &json_array)?;
+
+    info!("Dump accounts to file: {}", file_path);
+
+    Ok(())
+}
+
+pub async fn load_accounts_from_file(
+    slot: u64
+) -> Result<(HashMap<Pubkey, Account>, Vec<Pubkey>)> {
+    let file_path = format!("./dump_data/{}.json", slot);
+    let file = File::open(file_path.clone())?;
+    let reader = BufReader::new(file);
+    let mut accounts = HashMap::new();
+    let json_array: serde_json::Value = serde_json::from_reader(reader)?;
+    let json_map = json_array.as_array().unwrap()[0].as_object().unwrap();
+    let reserve_pubkeys = json_array.as_array().unwrap()[1].as_array().unwrap().iter().map(|b| Pubkey::from_str(b.as_str().unwrap()).unwrap()).collect::<Vec<Pubkey>>();
+
+    for (pubkey, data) in json_map.iter() {
+        let pubkey = Pubkey::from_str(pubkey)?;
+        let data_array = data.as_array().unwrap().iter().map(|b| b.as_u64().unwrap()).collect::<Vec<u64>>();
+        accounts.insert(pubkey, Account {
+            lamports: 0,
+            data: data_array.iter().map(|b| *b as u8).collect(),
+            owner: Pubkey::default(),
+            executable: false,
+            rent_epoch: 0,
+        });
+    }
+    info!("Load accounts from file: {}, count: {}", file_path, accounts.len());
+    Ok((accounts, reserve_pubkeys))
 }
 
 pub fn load_competitors_from_file() -> Result<Vec<Pubkey>> {
