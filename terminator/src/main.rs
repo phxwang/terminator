@@ -1001,8 +1001,17 @@ async fn scan_obligations(
         let b_unhealthy_borrow_value_sf = b_obligation.unhealthy_borrow_value_sf as f64;
         let a_ratio = a_borrow_factor_adjusted_debt_value_sf / a_unhealthy_borrow_value_sf;
         let b_ratio = b_borrow_factor_adjusted_debt_value_sf / b_unhealthy_borrow_value_sf;
-        a_ratio.partial_cmp(&b_ratio).unwrap_or(std::cmp::Ordering::Equal)
+        debug!("{}: {}, {}: {}", a.to_string().green(), a_ratio, b.to_string().green(), b_ratio);
+        b_ratio.partial_cmp(&a_ratio).unwrap_or(std::cmp::Ordering::Equal)
     });
+
+    info!("sorted liquidatable_obligations: {:?}", liquidatable_obligations.iter().map(|obligation_key| {
+        let obligation = obligation_map.get(obligation_key).unwrap();
+        let a_borrow_factor_adjusted_debt_value_sf = obligation.borrow_factor_adjusted_debt_value_sf as f64;
+        let a_unhealthy_borrow_value_sf = obligation.unhealthy_borrow_value_sf as f64;
+        let a_ratio = a_borrow_factor_adjusted_debt_value_sf / a_unhealthy_borrow_value_sf;
+        (*obligation_key, a_ratio)
+    }).collect::<Vec<(Pubkey, f64)>>());
 
 
     checked_obligation_count

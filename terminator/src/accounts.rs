@@ -13,7 +13,7 @@ use anchor_client::{
     },
     solana_sdk::{account::Account, account_info::AccountInfo, pubkey::Pubkey, signer::Signer},
 };
-use anchor_lang::{Id, AccountDeserialize};
+use anchor_lang::{Id, AccountDeserialize, Discriminator};
 use solana_sdk::{clock::Clock, sysvar::SysvarId};
 use anchor_spl::token::Token;
 use anyhow::Result;
@@ -485,7 +485,7 @@ pub async fn account_update_ws(
     // Collect all scope price account keys
     let scope_price_pubkeys = all_scope_price_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
     let switchboard_pubkeys = all_switchboard_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
-    let all_obligations_pubkeys = market_obligations_map.values().flatten().copied().collect::<Vec<Pubkey>>();
+    let mut all_obligations_pubkeys = market_obligations_map.values().flatten().copied().collect::<Vec<Pubkey>>();
     let mut pubkeys: Vec<Pubkey> = HashSet::<Pubkey>::from_iter([scope_price_pubkeys.clone(), switchboard_pubkeys, all_obligations_pubkeys.clone()].concat()).into_iter().collect();
     pubkeys.push(Clock::id());
     info!("account update ws: {:?}", pubkeys);
@@ -535,7 +535,7 @@ pub async fn account_update_ws(
         .send(SubscribeRequest {
             slots: HashMap::new(),
             accounts,
-            transactions,
+            transactions: transactions.clone(),
             blocks: HashMap::new(),
             blocks_meta: HashMap::new(),
             commitment: Some(CommitmentLevel::Processed.into()),
@@ -596,6 +596,16 @@ pub async fn account_update_ws(
                             continue;
                         }
 
+                        if data.len() < 8 {
+                            debug!("Account: {:?} is not scope price account", pubkey);
+                            continue;
+                        }
+
+                        let disc_bytes = &data[0..8];
+                        if disc_bytes != ScopePrices::discriminator() {
+                            debug!("Account: {:?} is not scope price account", pubkey);
+                            continue;
+                        }
 
                         let scope_prices = bytemuck::from_bytes::<ScopePrices>(&data[8..]);
                         //info!("Account: {:?}, scope_prices updated: {:?}", pubkey, scope_prices.prices.len());
@@ -679,8 +689,15 @@ pub async fn account_update_ws(
                                     }
                                 }
 
+                                if obligations_to_refresh.is_empty() {
+                                    info!("No new obligations to refresh");
+                                    continue;
+                                }
+
+                                pubkeys.extend(obligations_to_refresh.clone());
+
                                 let mut accounts = HashMap::new();
-                                let account_filter = obligations_to_refresh.iter().map(|key| key.to_string()).collect::<Vec<String>>();
+                                let account_filter = pubkeys.iter().map(|key| key.to_string()).collect::<Vec<String>>();
                                 accounts.insert(
                                     "client".to_string(),
                                     SubscribeRequestFilterAccounts {
@@ -694,7 +711,7 @@ pub async fn account_update_ws(
                                     SubscribeRequest {
                                         slots: HashMap::new(),
                                         accounts,
-                                        transactions: HashMap::new(),
+                                        transactions: transactions.clone(),
                                         blocks: HashMap::new(),
                                         blocks_meta: HashMap::new(),
                                         commitment: Some(CommitmentLevel::Processed.into()),
@@ -709,6 +726,7 @@ pub async fn account_update_ws(
                                         endpoint, e
                                     ))
                                 })?;
+                                all_obligations_pubkeys.extend(obligations_to_refresh);
                                 market_obligations_map.clear();
                                 market_obligations_map.extend(updated_obligations_map);
                                 info!("Successfully loaded {} markets from obligations map", market_obligations_map.len());
