@@ -22,7 +22,7 @@ use extra_proto::{Replace, SimulateTransactionRequest};
 
 
 use crate::{
-    accounts::{map_accounts_and_create_infos, oracle_accounts, OracleAccounts, MarketAccounts, account_update_ws, dump_accounts_to_file},
+    accounts::{map_accounts_and_create_infos, oracle_accounts, OracleAccounts, MarketAccounts, account_update_ws, dump_accounts_to_file, refresh_oracle_keys},
     client::KlendClient,
     config::get_lending_markets,
     jupiter::get_best_swap_instructions,
@@ -805,6 +805,11 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
     let en = start.elapsed().as_secs_f64();
     debug!("[Liquidation Thread] Refreshed token states time used: {} in {}s", address.to_string().green(), en);
 
+    // Collect keys before moving the vectors
+    let mut obligation_reserve_keys = Vec::new();
+    obligation_reserve_keys.extend(borrow_reserves.iter().map(|b| b.key).collect::<Vec<_>>());
+    obligation_reserve_keys.extend(deposit_reserves.iter().map(|d| d.key).collect::<Vec<_>>());
+
     if let Err(e) = kamino_lending::lending_market::lending_operations::refresh_obligation(
         &mut obligation,
         &lending_market,
@@ -835,6 +840,24 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
         }
         let liquidate_en = liquidate_start.elapsed().as_secs_f64();
         info!("[Liquidation Thread] Liquidated obligation time used: {} in {}s", address.to_string().green(), liquidate_en);
+
+        //dump accounts
+
+        let mut all_oracle_keys = HashSet::new();
+        let mut pyth_keys = HashSet::new();
+        let mut switchboard_keys = HashSet::new();
+        let mut scope_keys = HashSet::new();
+
+        refresh_oracle_keys(reserves, &mut all_oracle_keys, &mut pyth_keys, &mut switchboard_keys, &mut scope_keys);
+
+        let mut to_dump_keys = Vec::new();
+        to_dump_keys.extend(all_oracle_keys);
+        to_dump_keys.push(Clock::id());
+        to_dump_keys.push(address.clone());
+        to_dump_keys.push(obligation.lending_market);
+        to_dump_keys.extend(obligation_reserve_keys.clone());
+
+        dump_accounts_to_file(&mut klend_client.extra_client.clone(), &to_dump_keys, clock.slot, &obligation_reserve_keys).await?;
     }
     else {
         debug!("[Liquidation Thread] Obligation is not liquidatable: {} {}", address.to_string().green(), obligation.to_string().green());
