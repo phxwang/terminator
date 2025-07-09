@@ -4,6 +4,7 @@ use std::time::Duration;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter};
 use std::str::FromStr;
+use std::path::Path;
 
 use anchor_client::{
     solana_client::{
@@ -12,7 +13,7 @@ use anchor_client::{
     },
     solana_sdk::{account::Account, account_info::AccountInfo, pubkey::Pubkey, signer::Signer},
 };
-use anchor_lang::Id;
+use anchor_lang::{Id, AccountDeserialize};
 use solana_sdk::{clock::Clock, sysvar::SysvarId};
 use anchor_spl::token::Token;
 use anyhow::Result;
@@ -26,7 +27,7 @@ use tracing::{info, debug, error};
 use yellowstone_grpc_proto::prelude::{SubscribeRequest, SubscribeRequestFilterAccounts, SubscribeRequestFilterTransactions, subscribe_update::UpdateOneof};
 use yellowstone_grpc_proto::geyser::CommitmentLevel;
 use yellowstone_grpc_proto::tonic;
-use tokio::time::interval;
+use tokio::time::sleep;
 use extra_proto::GetMultipleAccountsRequest;
 
 use crate::{
@@ -435,10 +436,45 @@ pub fn load_competitors_from_file() -> Result<Vec<Pubkey>> {
     Ok(competitors)
 }
 
+pub async fn load_obligations_map(scope: String) -> Result<HashMap<Pubkey, Vec<Pubkey>>, std::result::Result<(), anyhow::Error>> {
+    let file_path = format!("{}.json", scope);
+    if !Path::new(&file_path).exists() {
+        info!("[Liquidation Thread] File {} does not exist", file_path);
+        sleep(Duration::from_secs(5)).await;
+        return Err(Ok(()));
+    }
+    let file = match File::open(&file_path) {
+        Ok(file) => file,
+        Err(e) => {
+            error!("[Liquidation Thread] Error opening file {}: {}", file_path, e);
+            sleep(Duration::from_secs(5)).await;
+            return Err(Ok(()));
+        }
+    };
+    let obligations_map: HashMap<String, Vec<String>> = match serde_json::from_reader(file) {
+        Ok(obligations_map) => {
+            obligations_map
+        }
+        Err(e) => {
+            error!("[Liquidation Thread] Error loading obligations map: {}", e);
+            return Err(Err(e.into()));
+        }
+    };
+    if obligations_map.is_empty() {
+        info!("[Liquidation Thread] No liquidatable obligations found");
+        sleep(Duration::from_secs(5)).await;
+        return Err(Ok(()));
+    }
+    //covert string to pubkey
+    let obligations_map = obligations_map.iter().map(|(k, v)| (Pubkey::from_str(k).unwrap(), v.iter().map(|s| Pubkey::from_str(s).unwrap()).collect::<Vec<Pubkey>>())).collect::<HashMap<Pubkey, Vec<Pubkey>>>();
+    Ok(obligations_map)
+}
+
 pub async fn account_update_ws(
     klend_client: &Arc<KlendClient>,
+    scope: String,
     market_pubkeys: &Vec<Pubkey>,
-    market_obligations_map: &HashMap<Pubkey, Vec<String>>,
+    market_obligations_map: &mut HashMap<Pubkey, Vec<Pubkey>>,
     all_scope_price_accounts: &mut Vec<(Pubkey, bool, Account)>,
     all_switchboard_accounts: &mut Vec<(Pubkey, bool, Account)>,
     all_reserves: &mut HashMap<Pubkey, Reserve>,
@@ -449,7 +485,8 @@ pub async fn account_update_ws(
     // Collect all scope price account keys
     let scope_price_pubkeys = all_scope_price_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
     let switchboard_pubkeys = all_switchboard_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
-    let mut pubkeys: Vec<Pubkey> = HashSet::<Pubkey>::from_iter([scope_price_pubkeys.clone(), switchboard_pubkeys].concat()).into_iter().collect();
+    let all_obligations_pubkeys = market_obligations_map.values().flatten().copied().collect::<Vec<Pubkey>>();
+    let mut pubkeys: Vec<Pubkey> = HashSet::<Pubkey>::from_iter([scope_price_pubkeys.clone(), switchboard_pubkeys, all_obligations_pubkeys.clone()].concat()).into_iter().collect();
     pubkeys.push(Clock::id());
     info!("account update ws: {:?}", pubkeys);
 
@@ -459,40 +496,6 @@ pub async fn account_update_ws(
 
     let obligation_map: Arc<RwLock<HashMap<Pubkey, Obligation>>> = Arc::new(RwLock::new(HashMap::new()));
     let mut obligation_reservers_to_refresh: Vec<Pubkey> = vec![];
-
-    // Create a thread to refresh obligation_map every 10 minutes
-    let obligation_map_clone = Arc::clone(&obligation_map);
-    let klend_client_clone = Arc::clone(klend_client);
-    //let _market_obligations_map_clone = market_obligations_map.clone();
-    tokio::spawn(async move {
-        let mut interval = interval(Duration::from_secs(600)); // 10 minutes
-        loop {
-            interval.tick().await;
-            debug!("Starting obligation map refresh cycle");
-
-            let obligation_keys: Vec<Pubkey> = {
-                let map = obligation_map_clone.read().unwrap();
-                map.keys().cloned().collect()
-            };
-
-            if obligation_keys.is_empty() {
-                debug!("No obligations to refresh");
-                continue;
-            }
-
-            match klend_client_clone.fetch_obligations_by_pubkey(&obligation_keys).await {
-                Ok(obligations) => {
-                    for (pubkey, obligation) in obligations {
-                        obligation_map_clone.write().unwrap().insert(pubkey, obligation);
-                    }
-                    info!("Completed obligation map refresh cycle for {} obligations", obligation_keys.len());
-                }
-                Err(e) => {
-                    error!("Failed to fetch obligations: {}", e);
-                }
-            }
-        }
-    });
 
     let mut accounts = HashMap::new();
     let account_filter = pubkeys.iter().map(|key| key.to_string()).collect::<Vec<String>>();
@@ -585,6 +588,15 @@ pub async fn account_update_ws(
                             continue;
                         }
 
+                        if all_obligations_pubkeys.contains(&pubkey) {
+                            let obligation = Obligation::try_deserialize(&mut data.as_slice()).unwrap();
+                            let mut obligation_map_write = obligation_map.write().unwrap();
+                            obligation_map_write.insert(pubkey, obligation);
+                            info!("Obligation updated: {:?}, obligation: {:?}", pubkey, obligation);
+                            continue;
+                        }
+
+
                         let scope_prices = bytemuck::from_bytes::<ScopePrices>(&data[8..]);
                         //info!("Account: {:?}, scope_prices updated: {:?}", pubkey, scope_prices.prices.len());
 
@@ -653,17 +665,68 @@ pub async fn account_update_ws(
                             let duration = start.elapsed();
                             info!("Scan {} obligations, time used: {:?} s, checked {} obligations", obligations.len(), duration, checked_obligation_count);
                         }
+
+                        //refresh market obligation map
+                        match load_obligations_map(scope.clone()).await {
+                            Ok(updated_obligations_map) => {
+                                //find all obligations pubkeys in updated_obligations_map that are not in market_obligations_map
+                                let updated_obligations_pubkeys = updated_obligations_map.values().flatten().cloned().collect::<Vec<Pubkey>>();
+                                let obligations_map_pubkeys = market_obligations_map.values().flatten().cloned().collect::<Vec<Pubkey>>();
+                                let mut obligations_to_refresh = Vec::new();
+                                for pubkey in updated_obligations_pubkeys {
+                                    if !obligations_map_pubkeys.contains(&pubkey) {
+                                        obligations_to_refresh.push(pubkey);
+                                    }
+                                }
+
+                                let mut accounts = HashMap::new();
+                                let account_filter = obligations_to_refresh.iter().map(|key| key.to_string()).collect::<Vec<String>>();
+                                accounts.insert(
+                                    "client".to_string(),
+                                    SubscribeRequestFilterAccounts {
+                                        account: account_filter,
+                                        owner: vec![],
+                                        filters: vec![],
+                                    },
+                                );
+                                //send subscribe request to refresh obligations
+                                subscribe_tx.send(
+                                    SubscribeRequest {
+                                        slots: HashMap::new(),
+                                        accounts,
+                                        transactions: HashMap::new(),
+                                        blocks: HashMap::new(),
+                                        blocks_meta: HashMap::new(),
+                                        commitment: Some(CommitmentLevel::Processed.into()),
+                                        accounts_data_slice: vec![],
+                                        transactions_status: HashMap::new(),
+                                        ping: None,
+                                        entry: HashMap::new(),
+                                    }
+                                ).await.map_err(|e| {
+                                    anyhow::Error::msg(format!(
+                                        "Failed to subscribe: {} ({})",
+                                        endpoint, e
+                                    ))
+                                })?;
+                                market_obligations_map.clear();
+                                market_obligations_map.extend(updated_obligations_map);
+                                info!("Successfully loaded {} markets from obligations map", market_obligations_map.len());
+                            }
+                            Err(e) => {
+                                error!("Failed to load obligations map: {:?}", e);
+                            }
+                        }
                     }
-                },
+                }
                 Some(UpdateOneof::Transaction(transaction)) => {
                     info!("Transaction of competitor: {:?}", transaction);
-                },
+                }
                 _ => {
                     debug!("Unknown update oneof: {:?}", msg.update_oneof);
                 }
             }
-        }
-        else {
+        } else {
             info!("Account Update error: {:?}", message);
             break;
         }
