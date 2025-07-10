@@ -32,7 +32,6 @@ use solana_sdk::{
     transaction::{TransactionError, VersionedTransaction},
     sysvar::{clock::Clock, SysvarId},
 };
-use tokio::task;
 use tracing::info;
 use anchor_lang::AccountDeserialize;
 
@@ -898,7 +897,7 @@ pub mod utils {
             .map(|market| {
                 let client = client.clone();
                 let market = *market;
-                task::spawn(async move { client.fetch_market_and_reserves(&market).await })
+                async move { client.fetch_market_and_reserves(&market).await }
             })
             .collect::<Vec<_>>();
 
@@ -906,7 +905,7 @@ pub mod utils {
 
         let mut map = HashMap::new();
         for (i, result) in results.into_iter().enumerate() {
-            let r = result??;
+            let r = result?;
             map.insert(markets[i], r);
         }
         Ok(map)
@@ -947,6 +946,7 @@ pub mod rpc {
             filters: Some(all_filters),
             account_config: RpcAccountInfoConfig {
                 encoding: Some(UiAccountEncoding::Base64Zstd),
+                commitment: Some(CommitmentConfig::confirmed()),
                 ..RpcAccountInfoConfig::default()
             },
             ..RpcProgramAccountsConfig::default()

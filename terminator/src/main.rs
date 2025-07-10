@@ -400,6 +400,10 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, slot: O
 
             // Reload accounts
             let mut ob = klend_client.fetch_obligation(obligation).await?;
+
+            info!("Obligation before refresh: {:?}", ob);
+            info!("Obligation summary before refresh: {:?}", ob.to_string());
+
             let market_accs = klend_client
                 .fetch_market_and_reserves(&ob.lending_market)
                 .await?;
@@ -458,6 +462,7 @@ async fn liquidate_with_loaded_data(
     loaded_accounts_data: Option<HashMap<Pubkey, Account>>,
 ) -> Result<(), anyhow::Error> {
     info!("Liquidating: Obligation: {:?}", ob);
+    info!("Liquidating: Obligation summary: {:?}", ob.to_string());
     let debt_res_key = match ob.borrows.iter().find(|b| b.borrowed_amount_sf > 0) {
         Some(borrow) => borrow.borrow_reserve,
         None => {
@@ -773,7 +778,7 @@ async fn liquidate_with_loaded_data(
     Ok(())
 }
 
-async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, mut obligation: Obligation, lending_market: &LendingMarket, clock: &Clock, reserves: &HashMap<Pubkey, Reserve>, rts: &HashMap<Pubkey, ReferrerTokenState>) -> Result<()> {
+async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, obligation: &mut Obligation, lending_market: &LendingMarket, clock: &Clock, reserves: &HashMap<Pubkey, Reserve>, rts: &HashMap<Pubkey, ReferrerTokenState>) -> Result<()> {
     let start = std::time::Instant::now();
     let ObligationReserves {
         deposit_reserves,
@@ -811,7 +816,7 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
     obligation_reserve_keys.extend(deposit_reserves.iter().map(|d| d.key).collect::<Vec<_>>());
 
     if let Err(e) = kamino_lending::lending_market::lending_operations::refresh_obligation(
-        &mut obligation,
+        obligation,
         &lending_market,
         clock.slot,
         deposit_reserves.into_iter(),
@@ -830,7 +835,7 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
         info!("[Liquidation Thread] Liquidating obligation start: pubkey: {}, obligation: {}, slot: {}", address.to_string().green(), obligation.to_string().green(), clock.slot);
 
         let liquidate_start = std::time::Instant::now();
-        match liquidate_with_loaded_data(klend_client, address, clock.clone(), obligation, reserves.clone(), *lending_market, rts.clone(), None).await {
+        match liquidate_with_loaded_data(klend_client, address, clock.clone(), *obligation, reserves.clone(), *lending_market, rts.clone(), None).await {
             Ok(_) => {
                 info!("[Liquidation Thread] Liquidated obligation finished: {} success", address.to_string().green());
             }
@@ -955,7 +960,7 @@ async fn scan_obligations(
 
         let start = std::time::Instant::now();
 
-        if let Some(obligation) = obligation_map.get(&address) {
+        if let Some(obligation) = obligation_map.get_mut(&address) {
             if let Some(price_changed_reserves) = price_changed_reserves {
                 //check if none of the reserves in the obligation are in the price_changed_reserves
                 if obligation.deposits.iter().all(|coll| !price_changed_reserves.contains(&coll.deposit_reserve)) &&
@@ -965,19 +970,19 @@ async fn scan_obligations(
                 }
             }
 
-            if let Err(e) = check_and_liquidate(klend_client, &address, *obligation, &lending_market, clock, &reserves, &rts).await {
+            if let Err(e) = check_and_liquidate(klend_client, &address, obligation, &lending_market, clock, &reserves, &rts).await {
                 error!("[Liquidation Thread] Error checking/liquidating obligation {}: {}", address, e);
             }
             checked_obligation_count += 1;
         } else {
             match klend_client.fetch_obligation(&address).await {
-                Ok(obligation) => {
-                    obligation_map.insert(*address, obligation);
+                Ok(mut obligation) => {
                     obligation_reservers_to_refresh.extend(obligation.deposits.iter().map(|coll| coll.deposit_reserve));
                     obligation_reservers_to_refresh.extend(obligation.borrows.iter().map(|borrow| borrow.borrow_reserve));
-                    if let Err(e) = check_and_liquidate(klend_client, &address, obligation, &lending_market, clock, &reserves, &rts).await {
+                    if let Err(e) = check_and_liquidate(klend_client, &address, &mut obligation, &lending_market, clock, &reserves, &rts).await {
                         error!("[Liquidation Thread] Error checking/liquidating obligation {}: {}", address, e);
                     }
+                    obligation_map.insert(*address, obligation);
                     checked_obligation_count += 1;
                 }
                 Err(e) => {
@@ -1003,9 +1008,14 @@ async fn scan_obligations(
 
     info!("sorted liquidatable_obligations: {:?}", liquidatable_obligations.iter().map(|obligation_key| {
         let obligation = obligation_map.get(obligation_key).unwrap();
-        let a_ratio = obligation.loan_to_value() / obligation.unhealthy_loan_to_value();
-        (*obligation_key, a_ratio.to_num::<f64>())
-    }).collect::<Vec<(Pubkey, f64)>>());
+        let obligation_stats = math::obligation_info(obligation_key, &obligation);
+        let a_ratio = obligation_stats.ltv / obligation_stats.unhealthy_ltv;
+        let liquidatable: bool = obligation_stats.ltv > obligation_stats.unhealthy_ltv;
+        if liquidatable {
+            info!("Liquidatable obligation: {} {:?}", obligation_key.to_string().green(), obligation.to_string());
+        }
+        (*obligation_key, liquidatable, a_ratio.to_num::<f64>(), obligation_stats.borrowed_amount.to_num::<f64>(), obligation_stats.deposited_amount.to_num::<f64>())
+    }).collect::<Vec<(Pubkey, bool, f64, f64, f64)>>());
 
 
     checked_obligation_count
@@ -1263,10 +1273,10 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
                 if is_liquidatable {
                     unhealthy_obligations += 1;
                     // TODO: liquidate
-                    info!("Liquidating obligation begin: {} {}", address.to_string().green(), obligation.to_string().green());
+                    info!("Liquidating obligation begin: {} {:?}", address.to_string().green(), obligation);
                     match liquidate(klend_client, address, None).await {
                         Ok(_) => {
-                            info!("Liquidated obligation success: {} {}", address.to_string().green(), obligation.to_string().green());
+                            info!("Liquidated obligation success: {} {:?}", address.to_string().green(), obligation);
                         }
                         Err(e) => {
                             error!("Liquidating obligation error: {} {}", address.to_string().green(), e);
@@ -1276,6 +1286,7 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
                     if near_liquidatable {
                         if is_big_fish {
                             market_big_fish_near_liquidatable_obligations.push(address.to_string());
+                            info!("Big fish near liquidatable obligation: {} {:?}", address.to_string().green(), obligation);
                         } else {
                             //market_big_fish_near_liquidatable_obligations.push(address.clone());
                             market_near_liquidatable_obligations.push(address.to_string());
