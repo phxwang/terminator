@@ -1273,10 +1273,10 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
                 if is_liquidatable {
                     unhealthy_obligations += 1;
                     // TODO: liquidate
-                    info!("Liquidating obligation begin: {} {:?}", address.to_string().green(), obligation);
+                    info!("Liquidating obligation begin: {} {:?}", address.to_string().green(), obligation.to_string());
                     match liquidate(klend_client, address, None).await {
                         Ok(_) => {
-                            info!("Liquidated obligation success: {} {:?}", address.to_string().green(), obligation);
+                            info!("Liquidated obligation success: {} {:?}", address.to_string().green(), obligation.to_string());
                         }
                         Err(e) => {
                             error!("Liquidating obligation error: {} {}", address.to_string().green(), e);
@@ -1286,7 +1286,7 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
                     if near_liquidatable {
                         if is_big_fish {
                             market_big_fish_near_liquidatable_obligations.push(address.to_string());
-                            info!("Big fish near liquidatable obligation: {} {:?}", address.to_string().green(), obligation);
+                            //info!("Big fish near liquidatable obligation: {} {:?}", address.to_string().green(), obligation);
                         } else {
                             //market_big_fish_near_liquidatable_obligations.push(address.clone());
                             market_near_liquidatable_obligations.push(address.to_string());
