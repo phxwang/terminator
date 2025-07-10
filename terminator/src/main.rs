@@ -995,22 +995,16 @@ async fn scan_obligations(
     liquidatable_obligations.sort_by(|a, b| {
         let a_obligation = obligation_map.get(a).unwrap();
         let b_obligation = obligation_map.get(b).unwrap();
-        let a_borrow_factor_adjusted_debt_value_sf = a_obligation.borrow_factor_adjusted_debt_value_sf as f64;
-        let b_borrow_factor_adjusted_debt_value_sf = b_obligation.borrow_factor_adjusted_debt_value_sf as f64;
-        let a_unhealthy_borrow_value_sf = a_obligation.unhealthy_borrow_value_sf as f64;
-        let b_unhealthy_borrow_value_sf = b_obligation.unhealthy_borrow_value_sf as f64;
-        let a_ratio = a_borrow_factor_adjusted_debt_value_sf / a_unhealthy_borrow_value_sf;
-        let b_ratio = b_borrow_factor_adjusted_debt_value_sf / b_unhealthy_borrow_value_sf;
+        let a_ratio = a_obligation.loan_to_value() / a_obligation.unhealthy_loan_to_value();
+        let b_ratio = b_obligation.loan_to_value() / b_obligation.unhealthy_loan_to_value();
         debug!("{}: {}, {}: {}", a.to_string().green(), a_ratio, b.to_string().green(), b_ratio);
         b_ratio.partial_cmp(&a_ratio).unwrap_or(std::cmp::Ordering::Equal)
     });
 
     info!("sorted liquidatable_obligations: {:?}", liquidatable_obligations.iter().map(|obligation_key| {
         let obligation = obligation_map.get(obligation_key).unwrap();
-        let a_borrow_factor_adjusted_debt_value_sf = obligation.borrow_factor_adjusted_debt_value_sf as f64;
-        let a_unhealthy_borrow_value_sf = obligation.unhealthy_borrow_value_sf as f64;
-        let a_ratio = a_borrow_factor_adjusted_debt_value_sf / a_unhealthy_borrow_value_sf;
-        (*obligation_key, a_ratio)
+        let a_ratio = obligation.loan_to_value() / obligation.unhealthy_loan_to_value();
+        (*obligation_key, a_ratio.to_num::<f64>())
     }).collect::<Vec<(Pubkey, f64)>>());
 
 

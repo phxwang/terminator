@@ -589,7 +589,14 @@ pub async fn account_update_ws(
                         }
 
                         if all_obligations_pubkeys.contains(&pubkey) {
-                            let obligation = Obligation::try_deserialize(&mut data.as_slice()).unwrap();
+                            let mut data_slice: &[u8] = &data;
+                            let obligation = match Obligation::try_deserialize(&mut data_slice) {
+                                Ok(obligation) => obligation,
+                                Err(e) => {
+                                    error!("Failed to deserialize obligation: {:?}, pubkey: {:?}", e, pubkey);
+                                    continue;
+                                }
+                            };
                             let mut obligation_map_write = obligation_map.write().unwrap();
                             obligation_map_write.insert(pubkey, obligation);
                             info!("Obligation updated: {:?}, obligation: {:?}", pubkey, obligation);
