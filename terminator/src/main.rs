@@ -439,7 +439,7 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, slot: O
             to_dump_keys.push(ob.lending_market);
             to_dump_keys.extend(obligation_reserve_keys.clone());
 
-            dump_accounts_to_file(&mut klend_client.extra_client.clone(), &to_dump_keys, clock.slot, &obligation_reserve_keys).await?;
+            dump_accounts_to_file(&mut klend_client.extra_client.clone(), &to_dump_keys, clock.slot, &obligation_reserve_keys, ob.clone()).await?;
 
             (ob, clock, reserves, market, rts, None)
         }
@@ -861,7 +861,7 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
         to_dump_keys.push(obligation.lending_market);
         to_dump_keys.extend(obligation_reserve_keys.clone());
 
-        dump_accounts_to_file(&mut klend_client.extra_client.clone(), &to_dump_keys, clock.slot, &obligation_reserve_keys).await?;
+        dump_accounts_to_file(&mut klend_client.extra_client.clone(), &to_dump_keys, clock.slot, &obligation_reserve_keys, obligation.clone()).await?;
     }
     else {
         debug!("[Liquidation Thread] Obligation is not liquidatable: {} {}", address.to_string().green(), obligation.to_string().green());

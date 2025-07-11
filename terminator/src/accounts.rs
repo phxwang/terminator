@@ -362,6 +362,7 @@ pub async fn dump_accounts_to_file(
     dump_account_pubkeys: &Vec<Pubkey>,
     slot: u64,
     reserve_pubkeys: &Vec<Pubkey>,
+    obligation: Obligation,
 ) -> Result<()> {
     let request = GetMultipleAccountsRequest {
         addresses: dump_account_pubkeys.iter()
@@ -387,6 +388,7 @@ pub async fn dump_accounts_to_file(
     }
 
     let mut json_array = vec![];
+    json_array.push(serde_json::Value::String(obligation.to_string()));
     json_array.push(serde_json::Value::Object(json_map));
     json_array.push(serde_json::Value::Array(reserve_pubkeys.iter().map(|key| serde_json::Value::String(key.to_string())).collect::<Vec<serde_json::Value>>()));
 
@@ -406,8 +408,9 @@ pub async fn load_accounts_from_file(
     let reader = BufReader::new(file);
     let mut accounts = HashMap::new();
     let json_array: serde_json::Value = serde_json::from_reader(reader)?;
-    let json_map = json_array.as_array().unwrap()[0].as_object().unwrap();
-    let reserve_pubkeys = json_array.as_array().unwrap()[1].as_array().unwrap().iter().map(|b| Pubkey::from_str(b.as_str().unwrap()).unwrap()).collect::<Vec<Pubkey>>();
+    let start_index = if json_array.as_array().unwrap().len() == 2 { 0 } else { 1 };
+    let json_map = json_array.as_array().unwrap()[start_index].as_object().unwrap();
+    let reserve_pubkeys = json_array.as_array().unwrap()[start_index + 1].as_array().unwrap().iter().map(|b| Pubkey::from_str(b.as_str().unwrap()).unwrap()).collect::<Vec<Pubkey>>();
 
     for (pubkey, data) in json_map.iter() {
         let pubkey = Pubkey::from_str(pubkey)?;
