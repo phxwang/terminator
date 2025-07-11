@@ -532,7 +532,7 @@ async fn liquidate_with_loaded_data(
         &lending_market.state.borrow(),
         &debt_reserve,
         &coll_reserve,
-        &mut obligation.state.borrow_mut(),
+        &mut obligation.state.borrow_mut().clone(),
         &clock,
         liquidate_amount,
         min_acceptable_received_collateral_amount,
