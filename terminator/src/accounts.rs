@@ -362,6 +362,7 @@ pub async fn dump_accounts_to_file(
     dump_account_pubkeys: &Vec<Pubkey>,
     slot: u64,
     reserve_pubkeys: &Vec<Pubkey>,
+    obligation_pubkey: Pubkey,
     obligation: Obligation,
 ) -> Result<()> {
     let request = GetMultipleAccountsRequest {
@@ -388,7 +389,7 @@ pub async fn dump_accounts_to_file(
     }
 
     let mut json_array = vec![];
-    json_array.push(serde_json::Value::String(obligation.to_string()));
+    json_array.push(serde_json::Value::String(format!("{}: {}", obligation_pubkey, obligation.to_string())));
     json_array.push(serde_json::Value::Object(json_map));
     json_array.push(serde_json::Value::Array(reserve_pubkeys.iter().map(|key| serde_json::Value::String(key.to_string())).collect::<Vec<serde_json::Value>>()));
 
