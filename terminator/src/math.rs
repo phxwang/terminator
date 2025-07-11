@@ -1,7 +1,7 @@
 use anchor_lang::prelude::Pubkey;
 use anyhow::Result;
 use colored::Colorize;
-use kamino_lending::{utils::Fraction, LiquidationParams, Obligation, ObligationCollateral, Reserve};
+use kamino_lending::{utils::Fraction, LiquidationParams, Obligation, ObligationCollateral, ObligationLiquidity, Reserve};
 use std::collections::HashMap;
 use tracing::{debug, info};
 
@@ -285,6 +285,25 @@ pub fn find_best_collateral_reserve(
         if mv > best_mv {
             best_mv = mv;
             best_reserve = Some(deposit.deposit_reserve);
+        }
+    }
+
+    best_reserve
+}
+
+pub fn find_best_debt_reserve(
+    borrows: &[ObligationLiquidity],
+    _reserves: &HashMap<Pubkey, Reserve>,
+) -> Option<Pubkey> {
+    // find the debt reserve with the highest market value
+    let mut best_reserve = None;
+    let mut best_mv = Fraction::ZERO;
+
+    for borrow in borrows {
+        let mv = Fraction::from_bits(borrow.market_value_sf);
+        if mv > best_mv {
+            best_mv = mv;
+            best_reserve = Some(borrow.borrow_reserve);
         }
     }
 

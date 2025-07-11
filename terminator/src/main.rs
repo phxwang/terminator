@@ -463,11 +463,11 @@ async fn liquidate_with_loaded_data(
 ) -> Result<(), anyhow::Error> {
     info!("Liquidating: Obligation: {:?}", ob);
     info!("Liquidating: Obligation summary: {:?}", ob.to_string());
-    let debt_res_key = match ob.borrows.iter().find(|b| b.borrowed_amount_sf > 0) {
-        Some(borrow) => borrow.borrow_reserve,
+    let debt_res_key = match math::find_best_debt_reserve(&ob.borrows, &reserves) {
+        Some(key) => key,
         None => {
-            error!("No borrowed amount found for obligation {}", obligation);
-            return Err(anyhow::anyhow!("No borrowed amount found for obligation"));
+            error!("No debt reserve found for obligation {}", obligation);
+            return Err(anyhow::anyhow!("No debt reserve found for obligation"));
         }
     };
     let coll_res_key = match math::find_best_collateral_reserve(&ob.deposits, &reserves) {
