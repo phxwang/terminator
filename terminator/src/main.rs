@@ -1284,13 +1284,10 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
                     }
                 } else {
                     if near_liquidatable {
-                        if is_big_fish {
-                            market_big_fish_near_liquidatable_obligations.push(address.to_string());
-                            //info!("Big fish near liquidatable obligation: {} {:?}", address.to_string().green(), obligation);
-                        } else {
-                            //market_big_fish_near_liquidatable_obligations.push(address.clone());
-                            market_near_liquidatable_obligations.push(address.to_string());
-                        }
+                        market_near_liquidatable_obligations.push(address.to_string());
+                    }
+                    else if is_big_fish {
+                        market_big_fish_near_liquidatable_obligations.push(address.to_string());
                     }
                     healthy_obligations += 1;
                 }

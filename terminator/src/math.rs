@@ -60,8 +60,8 @@ pub fn print_obligation_stats(
     } = obl_info;
 
     let is_liquidatable = ltv > unhealthy_ltv;
-    let near_liquidatable = ltv > &(unhealthy_ltv * &Fraction::from_num(0.95));
-    let is_big_fish = borrowed_amount > &Fraction::from_num(10000);
+    let near_liquidatable = (ltv > &(unhealthy_ltv * &Fraction::from_num(0.95))) &&  borrowed_amount > &Fraction::from_num(10);
+    let is_big_fish =(ltv > &(unhealthy_ltv * &Fraction::from_num(0.9))) &&  borrowed_amount > &Fraction::from_num(10000);
 
     let mut msg = format!(
         "{}/{} obligation: {}, healthy: {}, LTV: {:?}%/{:?}%, deposited: {} borrowed: {}",
