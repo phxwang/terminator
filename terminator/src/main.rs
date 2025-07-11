@@ -34,7 +34,6 @@ use crate::{
     },
     px::fetch_jup_prices,
     utils::get_all_reserve_mints,
-    fs::File,
 };
 
 pub mod accounts;
@@ -1000,22 +999,25 @@ async fn scan_obligations(
     liquidatable_obligations.sort_by(|a, b| {
         let a_obligation = obligation_map.get(a).unwrap();
         let b_obligation = obligation_map.get(b).unwrap();
-        let a_ratio = a_obligation.loan_to_value() / a_obligation.unhealthy_loan_to_value();
-        let b_ratio = b_obligation.loan_to_value() / b_obligation.unhealthy_loan_to_value();
-        debug!("{}: {}, {}: {}", a.to_string().green(), a_ratio, b.to_string().green(), b_ratio);
-        b_ratio.partial_cmp(&a_ratio).unwrap_or(std::cmp::Ordering::Equal)
+        let a_stats = math::obligation_info(a, a_obligation);
+        let b_stats = math::obligation_info(b, b_obligation);
+        let a_score = a_stats.borrowed_amount.to_num::<f64>() * (1.0 - (a_stats.ltv / a_stats.unhealthy_ltv).to_num::<f64>());
+        let b_score = b_stats.borrowed_amount.to_num::<f64>() * (1.0 - (b_stats.ltv / b_stats.unhealthy_ltv).to_num::<f64>());
+        debug!("{}: {}, {}: {}", a.to_string().green(), a_score, b.to_string().green(), b_score);
+        b_score.partial_cmp(&a_score).unwrap_or(std::cmp::Ordering::Equal)
     });
 
     info!("sorted liquidatable_obligations: {:?}", liquidatable_obligations.iter().map(|obligation_key| {
         let obligation = obligation_map.get(obligation_key).unwrap();
         let obligation_stats = math::obligation_info(obligation_key, &obligation);
-        let a_ratio = obligation_stats.ltv / obligation_stats.unhealthy_ltv;
+        let ratio = obligation_stats.ltv / obligation_stats.unhealthy_ltv;
+        let score = obligation_stats.borrowed_amount.to_num::<f64>() * (1.0 - ratio.to_num::<f64>()) / (1.0 - obligation_stats.unhealthy_ltv.to_num::<f64>());
         let liquidatable: bool = obligation_stats.ltv > obligation_stats.unhealthy_ltv;
         if liquidatable {
             info!("Liquidatable obligation: {} {:?}", obligation_key.to_string().green(), obligation.to_string());
         }
-        (*obligation_key, liquidatable, a_ratio.to_num::<f64>(), obligation_stats.borrowed_amount.to_num::<f64>(), obligation_stats.deposited_amount.to_num::<f64>())
-    }).collect::<Vec<(Pubkey, bool, f64, f64, f64)>>());
+        (*obligation_key, liquidatable, ratio.to_num::<f64>(), score, obligation_stats.borrowed_amount.to_num::<f64>(), obligation_stats.deposited_amount.to_num::<f64>())
+    }).collect::<Vec<(Pubkey, bool, f64, f64, f64, f64)>>());
 
 
     checked_obligation_count
@@ -1112,10 +1114,6 @@ async fn stream_liquidate(klend_client: &Arc<KlendClient>, scope: String) -> Res
 async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey>) -> Result<()> {
     let sleep_duration = Duration::from_secs(10);
 
-    // 保存所有near liquidatable obligations的数组
-    let _big_fish_near_liquidatable_obligations_map: Arc<RwLock<HashMap<Pubkey, Vec<Pubkey>>>> = Arc::new(RwLock::new(HashMap::new()));
-    let _near_liquidatable_obligations_map: Arc<RwLock<HashMap<Pubkey, Vec<Pubkey>>>> = Arc::new(RwLock::new(HashMap::new()));
-
     // 启动一个新的线程，扫描big_fish_near_liquidatable_obligations
     //let big_fish_near_liquidatable_obligations_map_clone = Arc::clone(&big_fish_near_liquidatable_obligations_map);
     //let near_liquidatable_obligations_map_clone = Arc::clone(&near_liquidatable_obligations_map);
@@ -1145,8 +1143,9 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
     };
 
     loop {
-        let mut near_liquidatable_obligations_new_map: HashMap<String, Vec<String>> = HashMap::new();
-        let mut big_fish_near_liquidatable_obligations_new_map: HashMap<String, Vec<String>> = HashMap::new();
+        let mut small_near_liquidatable_obligations_new_map: HashMap<String, Vec<String>> = HashMap::new();
+        let mut medium_near_liquidatable_obligations_new_map: HashMap<String, Vec<String>> = HashMap::new();
+        let mut big_near_liquidatable_obligations_new_map: HashMap<String, Vec<String>> = HashMap::new();
 
         for market in &markets {
             info!("{} cranking market", market.to_string().green());
@@ -1155,8 +1154,9 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
             let start = std::time::Instant::now();
 
             //let mut market_near_liquidatable_obligations: Vec<Pubkey> = vec![];
-            let mut market_big_fish_near_liquidatable_obligations: Vec<String> = vec![];
-            let mut market_near_liquidatable_obligations: Vec<String> = vec![];
+            let mut market_small_near_liquidatable_obligations: Vec<String> = vec![];
+            let mut market_medium_near_liquidatable_obligations: Vec<String> = vec![];
+            let mut market_big_near_liquidatable_obligations: Vec<String> = vec![];
 
             // Reload accounts
             let obligations = match ob {
@@ -1267,7 +1267,7 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
 
                 // info!("Refreshed obligation: {}", address.to_string().green());
                 let obligation_stats = math::obligation_info(address, obligation);
-                let (is_liquidatable, near_liquidatable, is_big_fish) = math::print_obligation_stats(&obligation_stats, address, i, num_obligations);
+                let (is_liquidatable, small_near_liquidatable, medium_near_liquidatable, big_near_liquidatable) = math::print_obligation_stats(&obligation_stats, address, i, num_obligations);
 
 
                 if is_liquidatable {
@@ -1283,23 +1283,30 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
                         }
                     }
                 } else {
-                    if near_liquidatable {
-                        market_near_liquidatable_obligations.push(address.to_string());
+                    if small_near_liquidatable {
+                        market_small_near_liquidatable_obligations.push(address.to_string());
                     }
-                    else if is_big_fish {
-                        market_big_fish_near_liquidatable_obligations.push(address.to_string());
+                    else if medium_near_liquidatable {
+                        market_medium_near_liquidatable_obligations.push(address.to_string());
+                    }
+                    else if big_near_liquidatable {
+                        market_big_near_liquidatable_obligations.push(address.to_string());
                     }
                     healthy_obligations += 1;
                 }
             }
 
             //near_liquidatable_obligations_new_map.insert(*market, market_near_liquidatable_obligations);
-            if !market_big_fish_near_liquidatable_obligations.is_empty() {
-                big_fish_near_liquidatable_obligations_new_map.insert(market.to_string(), market_big_fish_near_liquidatable_obligations);
+            if !market_small_near_liquidatable_obligations.is_empty() {
+                small_near_liquidatable_obligations_new_map.insert(market.to_string(), market_small_near_liquidatable_obligations);
             }
 
-            if !market_near_liquidatable_obligations.is_empty() {
-                near_liquidatable_obligations_new_map.insert(market.to_string(), market_near_liquidatable_obligations);
+            if !market_medium_near_liquidatable_obligations.is_empty() {
+                medium_near_liquidatable_obligations_new_map.insert(market.to_string(), market_medium_near_liquidatable_obligations);
+            }
+
+            if !market_big_near_liquidatable_obligations.is_empty() {
+                big_near_liquidatable_obligations_new_map.insert(market.to_string(), market_big_near_liquidatable_obligations);
             }
 
             let en = st.elapsed().as_secs_f64();
@@ -1308,50 +1315,21 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
             );
         }
 
-        //near_liquidatable_obligations_map = near_liquidatable_obligations_new_map;
+        for (map, file_name) in [
+            (small_near_liquidatable_obligations_new_map, "small_near_liquidatable_obligations.json"),
+            (medium_near_liquidatable_obligations_new_map, "medium_near_liquidatable_obligations.json"),
+            (big_near_liquidatable_obligations_new_map, "big_near_liquidatable_obligations.json"),
+        ] {
 
-        {
-            //let mut map_write = big_fish_near_liquidatable_obligations_map.write().unwrap();
-
-            //map_write.clear();
-            //map_write.extend(big_fish_near_liquidatable_obligations_new_map);
-            //for (market, obligations) in big_fish_near_liquidatable_obligations_new_map.iter() {
-                //map_write.insert(*market, obligations.to_vec());
-            //}
-
-            info!("writing big_fish_near_liquidatable_obligations_map to file");
-
-            // write big_fish_near_liquidatable_obligations_new_map to file
-            match File::create("big_fish_near_liquidatable_obligations.json") {
+            // write small_near_liquidatable_obligations_new_map to file
+            match std::fs::File::create(file_name) {
                 Ok(file) => {
-                    if let Err(e) = serde_json::to_writer_pretty(file, &big_fish_near_liquidatable_obligations_new_map) {
-                        error!("Error writing big_fish_near_liquidatable_obligations.json: {}", e);
+                    if let Err(e) = serde_json::to_writer_pretty(file, &map) {
+                        error!("Error writing {}: {}", file_name, e);
                     }
                 }
                 Err(e) => {
-                    error!("Error creating big_fish_near_liquidatable_obligations.json: {}", e);
-                }
-            }
-        }
-
-        {
-            //let mut map_write = near_liquidatable_obligations_map.write().unwrap();
-            //map_write.clear();
-            //for (market, obligations) in near_liquidatable_obligations_new_map.iter() {
-                //map_write.insert(*market, obligations.to_vec());
-            //}
-
-            info!("writing near_liquidatable_obligations_map to file");
-
-            // write near_liquidatable_obligations_new_map to file
-            match File::create("near_liquidatable_obligations.json") {
-                Ok(file) => {
-                    if let Err(e) = serde_json::to_writer_pretty(file, &near_liquidatable_obligations_new_map) {
-                        error!("Error writing near_liquidatable_obligations.json: {}", e);
-                    }
-                }
-                Err(e) => {
-                    error!("Error creating near_liquidatable_obligations.json: {}", e);
+                    error!("Error creating {}: {}", file_name, e);
                 }
             }
         }

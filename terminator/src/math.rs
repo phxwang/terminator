@@ -51,7 +51,7 @@ pub fn print_obligation_stats(
     address: &Pubkey,
     i: usize,
     num_obligations: usize,
-) -> (bool, bool, bool) {
+) -> (bool, bool, bool, bool) {
     let ObligationInfo {
         borrowed_amount,
         deposited_amount,
@@ -60,8 +60,9 @@ pub fn print_obligation_stats(
     } = obl_info;
 
     let is_liquidatable = ltv > unhealthy_ltv;
-    let near_liquidatable = (ltv > &(unhealthy_ltv * &Fraction::from_num(0.95))) &&  borrowed_amount > &Fraction::from_num(10);
-    let is_big_fish =(ltv > &(unhealthy_ltv * &Fraction::from_num(0.9))) &&  borrowed_amount > &Fraction::from_num(10000);
+    let big_near_liquidatable =  (ltv > &(unhealthy_ltv * &Fraction::from_num(0.94))) &&  borrowed_amount > &Fraction::from_num(10000);
+    let medium_near_liquidatable = !big_near_liquidatable && (ltv > &(unhealthy_ltv * &Fraction::from_num(0.95))) &&  borrowed_amount > &Fraction::from_num(100);
+    let small_near_liquidatable = !big_near_liquidatable && !medium_near_liquidatable && (ltv > &(unhealthy_ltv * &Fraction::from_num(0.95)));
 
     let mut msg = format!(
         "{}/{} obligation: {}, healthy: {}, LTV: {:?}%/{:?}%, deposited: {} borrowed: {}",
@@ -70,7 +71,7 @@ pub fn print_obligation_stats(
         address.to_string().green(),
         if is_liquidatable {
             "NO".red()
-        } else if near_liquidatable {
+        } else if small_near_liquidatable || medium_near_liquidatable || big_near_liquidatable {
             "NEAR".yellow()
         } else {
             "YES".green()
@@ -80,17 +81,17 @@ pub fn print_obligation_stats(
         deposited_amount,
         borrowed_amount,
     );
-    if is_big_fish {
+    if big_near_liquidatable {
         msg.push_str(", BIG FISH");
     }
 
-    if is_liquidatable || near_liquidatable {
+    if is_liquidatable || small_near_liquidatable || medium_near_liquidatable || big_near_liquidatable {
         info!("{}", msg);
     } else {
         debug!("{}", msg);
     }
 
-    (is_liquidatable, near_liquidatable, is_big_fish)
+    (is_liquidatable, small_near_liquidatable, medium_near_liquidatable, big_near_liquidatable)
 }
 
 pub fn get_liquidatable_amount(
