@@ -1014,8 +1014,8 @@ async fn scan_obligations(
         let b_obligation = obligation_map.get(b).unwrap();
         let a_stats = math::obligation_info(a, a_obligation);
         let b_stats = math::obligation_info(b, b_obligation);
-        let a_score = a_stats.borrowed_amount.to_num::<f64>() * (1.0 - (a_stats.ltv / a_stats.unhealthy_ltv).to_num::<f64>());
-        let b_score = b_stats.borrowed_amount.to_num::<f64>() * (1.0 - (b_stats.ltv / b_stats.unhealthy_ltv).to_num::<f64>());
+        let a_score = a_stats.borrowed_amount.to_num::<f64>() / (1.0 - (a_stats.ltv / a_stats.unhealthy_ltv).to_num::<f64>());
+        let b_score = b_stats.borrowed_amount.to_num::<f64>() / (1.0 - (b_stats.ltv / b_stats.unhealthy_ltv).to_num::<f64>());
         debug!("{}: {}, {}: {}", a.to_string().green(), a_score, b.to_string().green(), b_score);
         b_score.partial_cmp(&a_score).unwrap_or(std::cmp::Ordering::Equal)
     });
