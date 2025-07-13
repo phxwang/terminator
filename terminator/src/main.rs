@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, HashSet}, path::PathBuf, sync::{Arc, RwLock}, time::Duration, fs};
+use std::{collections::{HashMap, HashSet}, path::PathBuf, sync::Arc, time::Duration, fs};
 
 use anchor_client::{solana_sdk::pubkey::Pubkey, Cluster};
 use anyhow::Result;
@@ -751,21 +751,6 @@ async fn liquidate_with_loaded_data(
                 info!("Liquidating with normal client");
 
                 match klend_client
-                .local_client
-                .client
-                .simulate_transaction(&txn)
-                .await
-                {
-                    Ok(res) => {
-                        info!("Liquidating: Simulation result: {:?}", res);
-                    }
-                    Err(e) => {
-                        error!("Liquidating: Simulation error: {:?}", e);
-                    }
-                };
-
-
-                match klend_client
                     .local_client
                     .send_retry_and_confirm_transaction(txn, None, false)
                     .await
@@ -776,6 +761,20 @@ async fn liquidate_with_loaded_data(
                         }
                         Err(e) => {
                             error!("Liquidating: tx error: {:?}", e);
+
+                            match klend_client
+                                .local_client
+                                .client
+                                .simulate_transaction(&txn)
+                                .await
+                                {
+                                    Ok(res) => {
+                                        info!("Liquidating: Simulation result: {:?}", res);
+                                    }
+                                    Err(e) => {
+                                        error!("Liquidating: Simulation error: {:?}", e);
+                                    }
+                                };
                         }
                     };
             }
@@ -840,8 +839,45 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
     if obligation_stats.ltv > obligation_stats.unhealthy_ltv {
         info!("[Liquidation Thread] Liquidating obligation start: pubkey: {}, obligation: {}, slot: {}", address.to_string().green(), obligation.to_string().green(), clock.slot);
 
+        //dump accounts
+
+        let mut extra_client = klend_client.extra_client.clone();
+        let reserves_for_spawn = reserves.clone();
+        let obligation_lending_market = obligation.lending_market;
+        let obligation_reserve_keys = obligation_reserve_keys.clone();
+        let address = address.clone();
+        let obligation = obligation.clone();
+        let slot = clock.slot;
+
+        tokio::spawn(async move {
+            let mut all_oracle_keys = HashSet::new();
+            let mut pyth_keys = HashSet::new();
+            let mut switchboard_keys = HashSet::new();
+            let mut scope_keys = HashSet::new();
+
+            refresh_oracle_keys(&reserves_for_spawn, &mut all_oracle_keys, &mut pyth_keys, &mut switchboard_keys, &mut scope_keys);
+
+            let mut to_dump_keys = Vec::new();
+            to_dump_keys.extend(all_oracle_keys);
+            to_dump_keys.push(Clock::id());
+            to_dump_keys.push(address);
+            to_dump_keys.push(obligation_lending_market);
+            to_dump_keys.extend(obligation_reserve_keys.clone());
+
+            if let Err(e) = dump_accounts_to_file(
+                &mut extra_client,
+                &to_dump_keys,
+                slot,
+                &obligation_reserve_keys,
+                address,
+                obligation
+            ).await {
+                error!("Error dumping accounts to file: {}", e);
+            }
+        });
+
         let liquidate_start = std::time::Instant::now();
-        match liquidate_with_loaded_data(klend_client, address, clock.clone(), *obligation, reserves.clone(), *lending_market, rts.clone(), None).await {
+        match liquidate_with_loaded_data(klend_client, &address, clock.clone(), obligation, reserves.clone(), *lending_market, rts.clone(), None).await {
             Ok(_) => {
                 info!("[Liquidation Thread] Liquidated obligation finished: {} success", address.to_string().green());
             }
@@ -851,30 +887,6 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
         }
         let liquidate_en = liquidate_start.elapsed().as_secs_f64();
         info!("[Liquidation Thread] Liquidated obligation time used: {} in {}s", address.to_string().green(), liquidate_en);
-
-        //dump accounts
-
-        let mut all_oracle_keys = HashSet::new();
-        let mut pyth_keys = HashSet::new();
-        let mut switchboard_keys = HashSet::new();
-        let mut scope_keys = HashSet::new();
-
-        refresh_oracle_keys(reserves, &mut all_oracle_keys, &mut pyth_keys, &mut switchboard_keys, &mut scope_keys);
-
-        let mut to_dump_keys = Vec::new();
-        to_dump_keys.extend(all_oracle_keys);
-        to_dump_keys.push(Clock::id());
-        to_dump_keys.push(address.clone());
-        to_dump_keys.push(obligation.lending_market);
-        to_dump_keys.extend(obligation_reserve_keys.clone());
-
-        dump_accounts_to_file(
-            &mut klend_client.extra_client.clone(),
-            &to_dump_keys,
-            clock.slot,
-            &obligation_reserve_keys,
-            *address,
-            obligation.clone()).await?;
     }
     else {
         debug!("[Liquidation Thread] Obligation is not liquidatable: {} {}", address.to_string().green(), obligation.to_string().green());

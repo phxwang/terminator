@@ -369,7 +369,7 @@ pub async fn dump_accounts_to_file(
         addresses: dump_account_pubkeys.iter()
             .map(|address| address.to_bytes().to_vec())
             .collect(),
-        commitment_or_slot: slot,
+        commitment_or_slot: 0,
     };
     let response = extra_client.get_multiple_accounts(request).await?;
     let accounts = response.into_inner();
