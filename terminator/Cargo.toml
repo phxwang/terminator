@@ -9,6 +9,10 @@ description = "A rust klend liquidator"
 name = "klend-terminator"
 path = "src/main.rs"
 
+[lib]
+name = "klend_terminator"
+path = "src/lib.rs"
+
 [features]
 staging = ["kamino_lending/staging"]
 
@@ -63,4 +67,5 @@ log = "0.4"
 backoff = { version = "0.4", features = ["tokio"] }
 futures-util = "0.3.28"
 borsh = "0.10"
+hex = "0.4.3"
 extra-proto = { path = "./crates/custom:extra-proto" } # 自建服务

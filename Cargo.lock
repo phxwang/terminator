@@ -3079,6 +3079,7 @@ dependencies = [
  "fixed",
  "futures",
  "futures-util",
+ "hex",
  "itertools 0.12.1",
  "juno",
  "kamino_lending",

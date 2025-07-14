@@ -14,7 +14,7 @@ use anchor_client::{
     solana_sdk::{account::Account, account_info::AccountInfo, pubkey::Pubkey, signer::Signer},
 };
 use anchor_lang::{Id, AccountDeserialize, Discriminator};
-use solana_sdk::{clock::Clock, sysvar::SysvarId};
+use solana_sdk::{clock::Clock, sysvar::SysvarId, bs58, instruction::Instruction, address_lookup_table::AddressLookupTableAccount};
 use anchor_spl::token::Token;
 use anyhow::Result;
 use futures::SinkExt;
@@ -374,7 +374,14 @@ pub async fn dump_accounts_to_file(
     let response = extra_client.get_multiple_accounts(request).await?;
     let accounts = response.into_inner();
 
-    let file_path = format!("./dump_data/{}.json", slot);
+    let mut file_path = format!("./dump_data/{}.json", slot);
+
+    //check if file exists
+    if Path::new(&file_path).exists() {
+        info!("File {} already exists, append timestamp to file path", file_path);
+        file_path = format!("./dump_data/{}_{}.json", slot, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+    }
+
     let file = File::create(file_path.clone())?;
     let mut writer = BufWriter::new(file);
 
@@ -499,6 +506,7 @@ pub async fn account_update_ws(
 
 
     let obligation_map: Arc<RwLock<HashMap<Pubkey, Obligation>>> = Arc::new(RwLock::new(HashMap::new()));
+    let mut obligation_swap_map: HashMap<Pubkey, (Vec<Instruction>, Option<Vec<AddressLookupTableAccount>>)> = HashMap::new();
     let mut obligation_reservers_to_refresh: Vec<Pubkey> = vec![];
 
     let mut accounts = HashMap::new();
@@ -669,11 +677,20 @@ pub async fn account_update_ws(
                                 ).await;
 
                             //scan obligations
-                            let obligations = market_obligations_map.get_mut(market_pubkey).unwrap();
+                            let obligations = market_obligations_map.get_mut(market_pubkey);
+
+                            let obligations = match obligations {
+                                Some(obligations) => obligations,
+                                None => {
+                                    info!("No obligations found for market: {:?}", market_pubkey);
+                                    continue;
+                                }
+                            };
 
                             let mut obligation_map_write = obligation_map.write().unwrap();
                             let checked_obligation_count = scan_obligations(klend_client,
                                 &mut obligation_map_write,
+                                &mut obligation_swap_map,
                                 &mut obligation_reservers_to_refresh,
                                 &clock,
                                 obligations,
@@ -749,7 +766,17 @@ pub async fn account_update_ws(
                     }
                 }
                 Some(UpdateOneof::Transaction(transaction)) => {
-                    info!("Transaction of competitor: {:?}", transaction);
+                    let transaction = transaction.transaction;
+                    match transaction {
+                        Some(transaction) => {
+                            //covert signature vec to base58 string
+                            let signature = bs58::encode(transaction.signature.as_slice()).into_string();
+                            info!("Transaction of competitor, signature: {:?}", signature);
+                        }
+                        None => {
+                            continue;
+                        }
+                    }
                 }
                 _ => {
                     debug!("Unknown update oneof: {:?}", msg.update_oneof);
