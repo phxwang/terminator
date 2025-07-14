@@ -454,7 +454,8 @@ async fn liquidate(klend_client: &Arc<KlendClient>, obligation: &Pubkey, slot: O
         }
     };
 
-    liquidate_with_loaded_data(klend_client, obligation, clock, obligation_data, reserves, market, rts, loaded_accounts_data).await?;
+    let mut obligation_swap_map: HashMap<Pubkey, (Vec<Instruction>, Option<Vec<AddressLookupTableAccount>>)> = HashMap::new();
+    liquidate_with_loaded_data(klend_client, obligation, clock, obligation_data, reserves, market, rts, loaded_accounts_data, &mut obligation_swap_map).await?;
 
     Ok(())
 }
@@ -468,6 +469,7 @@ async fn liquidate_with_loaded_data(
     market: LendingMarket,
     _rts: HashMap<Pubkey, ReferrerTokenState>,
     loaded_accounts_data: Option<HashMap<Pubkey, Account>>,
+    obligation_swap_map: &mut HashMap<Pubkey, (Vec<Instruction>, Option<Vec<AddressLookupTableAccount>>)>,
 ) -> Result<(), anyhow::Error> {
     info!("Liquidating: Obligation: {:?}", ob);
     info!("Liquidating: Obligation summary: {:?}", ob.to_string());
@@ -645,65 +647,28 @@ async fn liquidate_with_loaded_data(
             };
         ixns.extend_from_slice(&liquidate_ixns);
 
-        //add jupiter swap ixns
-        let (jup_ixs, lookup_tables) = swap::swap_with_jupiter_ixns(
-            klend_client,
-            &coll_reserve.state.borrow().liquidity.mint_pubkey,
-            &debt_reserve.state.borrow().liquidity.mint_pubkey,
-            net_withdraw_liquidity_amount,
-            Some(liquidate_amount),
-            liquidation_swap_slippage_pct
-        ).await?;
+        let (jup_ixs, lookup_tables) = match obligation_swap_map.get(&obligation.key) {
+            Some(swap_data) => {
+                // TODO: 有可能会有两个swap的instruction，需要适配
+                let mut modified_jup_ixs = swap_data.0.clone();
+                instruction_parser::modify_jupiter_in_amount(&mut modified_jup_ixs[1], net_withdraw_liquidity_amount);
+                instruction_parser::modify_jupiter_out_amount(&mut modified_jup_ixs[1], liquidate_amount);
+                (modified_jup_ixs, swap_data.1.clone())
+            },
+            None => {
+                //add jupiter swap ixns
+                swap::swap_with_jupiter_ixns(
+                    klend_client,
+                    &coll_reserve.state.borrow().liquidity.mint_pubkey,
+                    &debt_reserve.state.borrow().liquidity.mint_pubkey,
+                    net_withdraw_liquidity_amount,
+                    Some(liquidate_amount),
+                    liquidation_swap_slippage_pct
+                ).await?
+            }
+        };
 
         info!("Liquidating: Jupiter swap ixns count: {:?}", jup_ixs.len());
-        // display jup_ixs
-        for (i, ix) in jup_ixs.iter().enumerate() {
-            let program_type = if instruction_parser::is_jupiter_program(&ix.program_id) {
-                "Jupiter"
-            } else if ix.program_id == compute_budget::id() {
-                "ComputeBudget"
-            } else {
-                "Other"
-            };
-
-            info!("{} instruction {}: program_id: {:?}", program_type, i, ix.program_id);
-
-            // 正确的方式：解析二进制数据
-            let parsed_data = instruction_parser::parse_instruction_data(&ix.data, &ix.program_id);
-            info!("{} instruction {} parsed data: {:?}", program_type, i, parsed_data);
-
-            // 显示原始数据（十六进制）
-            let hex_data = hex::encode(&ix.data);
-            info!("{} instruction {} raw data (hex): {}", program_type, i, hex_data);
-
-            // 显示数据长度和前几个字节
-            info!("{} instruction {} data length: {}, first 8 bytes: {:?}",
-                program_type, i, ix.data.len(),
-                if ix.data.len() >= 8 { &ix.data[0..8] } else { &ix.data });
-        }
-
-        // 示例：修改 Jupiter swap 指令
-        let mut modified_jup_ixs = jup_ixs.clone();
-        for (i, ix) in modified_jup_ixs.iter_mut().enumerate() {
-            if instruction_parser::is_jupiter_program(&ix.program_id) {
-                info!("Attempting to modify Jupiter instruction {}", i);
-
-                // 例子1：修改滑点（如果需要增加容错）
-                if let Err(e) = instruction_parser::modify_jupiter_slippage(ix, 5 as u16 * 100) {
-                    warn!("Failed to modify slippage for Jupiter instruction {}: {}", i, e);
-                }
-
-                // 例子2：如果需要修改输入金额
-                // if let Err(e) = instruction_parser::modify_jupiter_amount(ix, new_amount) {
-                //     warn!("Failed to modify amount for Jupiter instruction {}: {}", i, e);
-                // }
-
-                // 验证修改后的数据
-                let modified_parsed = instruction_parser::parse_instruction_data(&ix.data, &ix.program_id);
-                info!("Modified Jupiter instruction {} data: {:?}", i, modified_parsed);
-            }
-        }
-
         debug!("Liquidating: Jupiter swap ixns: {:?}", jup_ixs);
         debug!("Liquidating: Jupiter swap ixns lookup tables: {:?}", lookup_tables);
 
@@ -872,7 +837,14 @@ async fn liquidate_with_loaded_data(
     Ok(())
 }
 
-async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, obligation: &mut Obligation, lending_market: &LendingMarket, clock: &Clock, reserves: &HashMap<Pubkey, Reserve>, rts: &HashMap<Pubkey, ReferrerTokenState>) -> Result<()> {
+async fn check_and_liquidate(klend_client: &Arc<KlendClient>,
+    address: &Pubkey,
+    obligation: &mut Obligation,
+    lending_market: &LendingMarket,
+    clock: &Clock,
+    reserves: &HashMap<Pubkey, Reserve>,
+    rts: &HashMap<Pubkey, ReferrerTokenState>,
+    obligation_swap_map: &mut HashMap<Pubkey, (Vec<Instruction>, Option<Vec<AddressLookupTableAccount>>)>) -> Result<()> {
     let start = std::time::Instant::now();
     let ObligationReserves {
         deposit_reserves,
@@ -966,7 +938,10 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>, address: &Pubkey, 
         });
 
         let liquidate_start = std::time::Instant::now();
-        match liquidate_with_loaded_data(klend_client, &address, clock.clone(), obligation, reserves.clone(), *lending_market, rts.clone(), None).await {
+        match liquidate_with_loaded_data(
+            klend_client,
+            &address, clock.clone(),
+            obligation, reserves.clone(), *lending_market, rts.clone(), None, obligation_swap_map).await {
             Ok(_) => {
                 info!("[Liquidation Thread] Liquidated obligation finished: {} success", address.to_string().green());
             }
@@ -1059,7 +1034,7 @@ async fn liquidate_in_loop(klend_client: &Arc<KlendClient>, scope: String, oblig
     Ok(())
 }
 
-async fn preload_swap_instructions(klend_client: &Arc<KlendClient>, obligation_key: &Pubkey, obligation: &Obligation, reserves: &HashMap<Pubkey, Reserve>, obligation_swap_map: &mut HashMap<Pubkey, (Vec<Instruction>, Option<Vec<AddressLookupTableAccount>>)>) -> Result<()> {
+pub async fn preload_swap_instructions(klend_client: &Arc<KlendClient>, obligation_key: &Pubkey, obligation: &Obligation, reserves: &HashMap<Pubkey, Reserve>, obligation_swap_map: &mut HashMap<Pubkey, (Vec<Instruction>, Option<Vec<AddressLookupTableAccount>>)>) -> Result<()> {
 
     let debt_res_key = match math::find_best_debt_reserve(&obligation.borrows, &reserves) {
         Some(key) => key,
@@ -1135,7 +1110,7 @@ async fn scan_obligations(
                 }
             }
 
-            if let Err(e) = check_and_liquidate(klend_client, &address, obligation, &lending_market, clock, &reserves, &rts).await {
+            if let Err(e) = check_and_liquidate(klend_client, &address, obligation, &lending_market, clock, &reserves, &rts, obligation_swap_map).await {
                 error!("[Liquidation Thread] Error checking/liquidating obligation {}: {}", address, e);
             }
             checked_obligation_count += 1;
@@ -1144,14 +1119,16 @@ async fn scan_obligations(
                 Ok(mut obligation) => {
                     obligation_reservers_to_refresh.extend(obligation.deposits.iter().map(|coll| coll.deposit_reserve));
                     obligation_reservers_to_refresh.extend(obligation.borrows.iter().map(|borrow| borrow.borrow_reserve));
-                    if let Err(e) = check_and_liquidate(klend_client, &address, &mut obligation, &lending_market, clock, &reserves, &rts).await {
+                    if let Err(e) = preload_swap_instructions(klend_client, &address, &obligation, &reserves, obligation_swap_map).await {
+                        error!("[Liquidation Thread] Error preloading swap instructions for obligation {}: {}", address, e);
+                    }
+
+                    if let Err(e) = check_and_liquidate(klend_client, &address, &mut obligation, &lending_market, clock, &reserves, &rts, obligation_swap_map).await {
                         error!("[Liquidation Thread] Error checking/liquidating obligation {}: {}", address, e);
                     }
                     obligation_map.insert(*address, obligation);
                     checked_obligation_count += 1;
-                    if let Err(e) = preload_swap_instructions(klend_client, &address, &obligation, &reserves, obligation_swap_map).await {
-                        error!("[Liquidation Thread] Error preloading swap instructions for obligation {}: {}", address, e);
-                    }
+
                 }
                 Err(e) => {
                     error!("[Liquidation Thread] Error fetching obligation {}: {}", address, e);

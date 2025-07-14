@@ -37,6 +37,7 @@ use crate::{
     refresh_market,
     scan_obligations,
     sysvars,
+    preload_swap_instructions,
 };
 
 // Local types for scope price functionality
@@ -612,6 +613,10 @@ pub async fn account_update_ws(
                             let mut obligation_map_write = obligation_map.write().unwrap();
                             obligation_map_write.insert(pubkey, obligation);
                             info!("Obligation updated: {:?}, obligation: {:?}", pubkey, obligation);
+
+                            if let Err(e) = preload_swap_instructions(klend_client, &pubkey, &obligation, &all_reserves, &mut obligation_swap_map).await {
+                                error!("Failed to preload swap instructions for obligation {}: {}", pubkey, e);
+                            }
                             continue;
                         }
 

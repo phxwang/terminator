@@ -432,10 +432,18 @@ pub fn modify_jupiter_slippage(instruction: &mut Instruction, new_slippage_bps: 
 }
 
 /// 示例：修改 Jupiter swap 的输入金额
-pub fn modify_jupiter_amount(instruction: &mut Instruction, new_amount: u64) -> anyhow::Result<()> {
+pub fn modify_jupiter_in_amount(instruction: &mut Instruction, new_amount: u64) -> anyhow::Result<()> {
     modify_instruction_data(
         instruction,
         "in_amount",
+        FieldValue::U64(new_amount),
+    )
+}
+
+pub fn modify_jupiter_out_amount(instruction: &mut Instruction, new_amount: u64) -> anyhow::Result<()> {
+    modify_instruction_data(
+        instruction,
+        "quoted_out_amount",
         FieldValue::U64(new_amount),
     )
 }
@@ -558,7 +566,7 @@ mod tests {
 
         // 尝试修改amount (现在是U64类型)
         let new_amount = 500000000u64;
-        let amount_result = modify_jupiter_amount(&mut instruction, new_amount);
+        let amount_result = modify_jupiter_in_amount(&mut instruction, new_amount);
 
         if let Err(e) = &amount_result {
             println!("Amount modification failed: {}", e);
