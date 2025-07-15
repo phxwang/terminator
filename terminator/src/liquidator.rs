@@ -228,6 +228,8 @@ async fn get_or_create_atas(
         atas.insert(*mint, ata);
     }
 
+    client.check_and_add_to_ata_lookup_table(*owner_pubkey).await?;
+
     let ata_addresses: Vec<Pubkey> = atas.values().cloned().collect();
     let accounts = find_accounts(&client.local_client.client, &ata_addresses).await?;
     let mut existing_atas = HashMap::new();
