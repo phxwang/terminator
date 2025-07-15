@@ -659,12 +659,34 @@ async fn liquidate_with_loaded_data(
 
         let (jup_ixs, lookup_tables) = match obligation_swap_map.get(&obligation.key) {
             Some(swap_data) => {
-                // TODO: 有可能会有两个swap的instruction，需要适配
+                // 有可能会有两个swap的instruction，需要适配
                 let mut modified_jup_ixs = swap_data.0.clone();
-                info!("Liquidating: before modify jupiter in amount: {:?}", instruction_parser::parse_instruction_data(&modified_jup_ixs[1].data, &modified_jup_ixs[1].program_id));
+                let inst1 = instruction_parser::parse_instruction_data(&modified_jup_ixs[1].data, &modified_jup_ixs[1].program_id);
+                info!("Liquidating: before modify jupiter in amount: {:?}", inst1);
 
+                if modified_jup_ixs.len() > 2 {
+                    let in_amount = inst1.parsed_fields.iter().find(|f| f.name == "in_amount").unwrap().value.to_string();
+                    let ratio = net_withdraw_liquidity_amount as f64 / in_amount.parse::<u64>().unwrap() as f64;
+
+                    // multiply ratio to all in_amounts and out_amounts in modified_jup_ixs start from index 1
+                    for ix in modified_jup_ixs.iter_mut().skip(1) {
+                        let inst = instruction_parser::parse_instruction_data(&ix.data, &ix.program_id);
+                        let in_amount = inst.parsed_fields.iter().find(|f| f.name == "in_amount").unwrap().value.to_string();
+                        let out_amount = inst.parsed_fields.iter().find(|f| f.name == "quoted_out_amount").unwrap().value.to_string();
+                        let in_amount_u64 = in_amount.parse::<u64>().unwrap();
+                        let out_amount_u64 = out_amount.parse::<u64>().unwrap();
+                        let new_in_amount = (in_amount_u64 as f64 * ratio) as u64;
+                        let new_out_amount = (out_amount_u64 as f64 * ratio) as u64;
+                        instruction_parser::modify_jupiter_in_amount(ix, new_in_amount);
+                        instruction_parser::modify_jupiter_out_amount(ix, new_out_amount);
+
+                        info!("Liquidating: Modified jupiter in amount: {:?}", instruction_parser::parse_instruction_data(&ix.data, &ix.program_id));
+                    }
+                }
+
+                let last_ix = modified_jup_ixs.len() - 1;
                 instruction_parser::modify_jupiter_in_amount(&mut modified_jup_ixs[1], net_withdraw_liquidity_amount);
-                instruction_parser::modify_jupiter_out_amount(&mut modified_jup_ixs[1], liquidate_amount);
+                instruction_parser::modify_jupiter_out_amount(&mut modified_jup_ixs[last_ix], liquidate_amount);
 
                 info!("Liquidating: Modified jupiter in amount: {:?}", instruction_parser::parse_instruction_data(&modified_jup_ixs[1].data, &modified_jup_ixs[1].program_id));
 

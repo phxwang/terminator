@@ -1,6 +1,7 @@
 use anchor_lang::AnchorSerialize;
 use solana_sdk::{pubkey::Pubkey, instruction::Instruction};
-use std::io::Cursor;
+use std::{io::Cursor, fmt};
+use hex;
 
 /// 通用的指令数据解析结果
 #[derive(Debug, Clone)]
@@ -61,6 +62,21 @@ pub enum FieldValue {
     Pubkey(Pubkey),
     Bytes(Vec<u8>),
     String(String),
+}
+
+impl fmt::Display for FieldValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FieldValue::U8(val) => write!(f, "{}", val),
+            FieldValue::U16(val) => write!(f, "{}", val),
+            FieldValue::U32(val) => write!(f, "{}", val),
+            FieldValue::U64(val) => write!(f, "{}", val),
+            FieldValue::I64(val) => write!(f, "{}", val),
+            FieldValue::Pubkey(val) => write!(f, "{}", val),
+            FieldValue::Bytes(val) => write!(f, "{}", hex::encode(val)),
+            FieldValue::String(val) => write!(f, "{}", val),
+        }
+    }
 }
 
 /// 解析指令数据的主要函数
