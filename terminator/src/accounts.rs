@@ -14,7 +14,7 @@ use anchor_client::{
     solana_sdk::{account::Account, account_info::AccountInfo, pubkey::Pubkey, signer::Signer},
 };
 use anchor_lang::{Id, AccountDeserialize, Discriminator};
-use solana_sdk::{clock::Clock, sysvar::SysvarId, bs58, instruction::Instruction, address_lookup_table::AddressLookupTableAccount};
+use solana_sdk::{clock::Clock, sysvar::SysvarId, bs58, instruction::Instruction, address_lookup_table::{AddressLookupTableAccount, instruction}};
 use anchor_spl::token::Token;
 use anyhow::Result;
 use futures::SinkExt;
@@ -125,6 +125,10 @@ pub async fn market_and_reserve_accounts(
         rpc::get_zero_copy_pa(&client.client, &client.program_id, &filters).await?;
 
     let reserves: HashMap<Pubkey, Reserve> = res.into_iter().collect();
+
+    for reserve_key in reserves.keys() {
+        client.check_and_add_to_custom_lookup_table(*reserve_key).await?;
+    }
 
     Ok(MarketAccounts {
         reserves,
@@ -450,7 +454,6 @@ pub fn load_competitors_from_file() -> Result<Vec<Pubkey>> {
 }
 
 pub async fn create_new_lookup_tables_account(klend_client: &Arc<KlendClient>) -> Result<()> {
-    use solana_sdk::address_lookup_table::instruction;
     use solana_sdk::commitment_config::CommitmentConfig;
 
     //在链上新建一个lookup table account

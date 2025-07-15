@@ -3,7 +3,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, RwLock},
     thread,
     time::Duration,
 };
@@ -25,7 +25,7 @@ use kamino_lending::{
 use orbit_link::OrbitLink;
 use solana_account_decoder::parse_address_lookup_table::UiLookupTable;
 use solana_sdk::{
-    address_lookup_table::{state::AddressLookupTable, AddressLookupTableAccount},
+    address_lookup_table::{instruction, state::AddressLookupTable, AddressLookupTableAccount},
     commitment_config::CommitmentConfig,
     instruction::Instruction,
     signature::{Keypair, Signature},
@@ -61,7 +61,7 @@ pub struct KlendClient {
     // Txn data
     pub lookup_table: Option<AddressLookupTableAccount>,
 
-    pub custom_lookup_table: Option<AddressLookupTableAccount>,
+    pub custom_lookup_table: RwLock<Option<AddressLookupTableAccount>>,
 
     // Rebalance settings
     pub rebalance_config: Option<RebalanceConfig>,
@@ -100,7 +100,7 @@ impl KlendClient {
             local_client,
             extra_client,
             lookup_table: None,
-            custom_lookup_table: None,
+            custom_lookup_table: RwLock::new(None),
             liquidator,
             rebalance_config,
         })
@@ -158,6 +158,51 @@ impl KlendClient {
         Ok(map)
     }
 
+    pub async fn check_and_add_to_custom_lookup_table(&self, account_key: Pubkey) -> Result<()> {
+
+        if let Some(ref lookup_table) = self.lookup_table {
+            if lookup_table.addresses.contains(&account_key) {
+                return Ok(());
+            }
+        }
+
+        let custom_lookup_table = {
+            let guard = self.custom_lookup_table.read().unwrap();
+            guard.clone().unwrap()
+        };
+
+        if custom_lookup_table.addresses.contains(&account_key) {
+            return Ok(());
+        }
+
+        info!("Adding account to custom lookup table: {:?}", account_key);
+
+        //add account to custom lookup table
+        let mut updated_custom_lookup_table = custom_lookup_table.clone();
+        updated_custom_lookup_table.addresses.push(account_key);
+
+        //init tx to add one address to custom lookup table
+        let tx = self.local_client.tx_builder().add_ix(instruction::extend_lookup_table(
+            custom_lookup_table.key,
+            self.client.payer_pubkey(),
+            Some(self.client.payer_pubkey()),
+            vec![account_key],
+        )).build(&[]).await?;
+
+        let (sig, _) = self.local_client
+            .send_retry_and_confirm_transaction(tx, None, false)
+            .await?;
+
+        // Update the in-memory lookup table after successful transaction
+        {
+            let mut guard = self.custom_lookup_table.write().unwrap();
+            *guard = Some(updated_custom_lookup_table);
+        }
+
+        info!("Added account to custom lookup table: {} with signature: {:?}", account_key, sig);
+        Ok(())
+    }
+
     pub async fn load_lookup_table(&mut self, market_accounts: MarketAccounts) {
         self.load_liquidator_lookup_table().await;
         self.update_liquidator_lookup_table(collect_keys(
@@ -188,13 +233,17 @@ impl KlendClient {
         self.lookup_table = self.load_lookup_table_from_file(&filename).await.unwrap();
     }
 
-    async fn load_custom_lookup_table(&mut self) {
+    async fn load_custom_lookup_table(&self) {
         let filename = std::env::var("CUSTOM_LOOKUP_TABLE_FILE").unwrap();
-        self.custom_lookup_table = self.load_lookup_table_from_file(&filename).await.unwrap();
+        let lookup_table = self.load_lookup_table_from_file(&filename).await.unwrap();
+        {
+            let mut guard = self.custom_lookup_table.write().unwrap();
+            *guard = lookup_table;
+        }
     }
 
 
-    async fn load_lookup_table_from_file(&mut self, filename: &str) -> Result<Option<AddressLookupTableAccount>> {
+    async fn load_lookup_table_from_file(&self, filename: &str) -> Result<Option<AddressLookupTableAccount>> {
 
         if !std::path::Path::new(&filename).exists() {
             File::create(&filename).unwrap();
@@ -287,11 +336,11 @@ impl KlendClient {
     }
 
     async fn create_init_reserve_lookup_table(
-        &mut self,
+        &self,
         keys: &[Pubkey],
         delay_fn: impl Fn(),
     ) -> Result<AddressLookupTableAccount> {
-        use solana_sdk::address_lookup_table::instruction;
+
 
         // Create lookup table
         let recent_slot = self
@@ -332,7 +381,6 @@ impl KlendClient {
         keys: &[Pubkey],
         delay_fn: impl Fn(),
     ) -> Result<()> {
-        use solana_sdk::address_lookup_table::instruction;
 
         for selected_keys in keys.chunks(20) {
             info!("Extending lookup table with {} keys", selected_keys.len());
