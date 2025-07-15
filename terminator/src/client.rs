@@ -428,6 +428,7 @@ impl KlendClient {
         liquidity_amount: u64,
         min_acceptable_received_coll_amount: u64,
         max_allowed_ltv_override_pct_opt: Option<u64>,
+        reserves: &HashMap<Pubkey, Reserve>,
     ) -> Result<Vec<Instruction>> {
         let liquidate_ix = instructions::liquidate_obligation_and_redeem_reserve_collateral_ix(
             &self.program_id,
@@ -447,6 +448,7 @@ impl KlendClient {
                 &[ReserveFarmKind::Collateral, ReserveFarmKind::Debt],
                 &obligation,
                 &self.liquidator.wallet.clone(),
+                reserves,
             )
             .await;
 
@@ -472,6 +474,7 @@ impl KlendClient {
         liquidity_amount: u64,
         min_acceptable_received_coll_amount: u64,
         max_allowed_ltv_override_pct_opt: Option<u64>,
+        reserves: &HashMap<Pubkey, Reserve>,
     ) -> Result<VersionedTransaction> {
         let instructions = self
             .liquidate_obligation_and_redeem_reserve_collateral_ixns(
@@ -482,6 +485,7 @@ impl KlendClient {
                 liquidity_amount,
                 min_acceptable_received_coll_amount,
                 max_allowed_ltv_override_pct_opt,
+                reserves,
             )
             .await?;
 
@@ -501,6 +505,7 @@ impl KlendClient {
         farm_modes: &[ReserveFarmKind],
         obligation: &StateWithKey<Obligation>,
         payer: &Arc<Keypair>,
+        reserves: &HashMap<Pubkey, Reserve>,
     ) -> (Vec<InstructionBlocks>, Vec<InstructionBlocks>) {
         // If has farms, also do init farm obligations
         // Always do refresh_reserve
@@ -516,7 +521,7 @@ impl KlendClient {
         let obligation_address = obligation.key;
 
         let (deposit_reserves, borrow_reserves, referrer_token_states) = self
-            .get_obligation_reserves_and_referrer_token_states(&obligation_state)
+            .get_obligation_reserves_and_referrer_token_states(&obligation_state, reserves)
             .await;
 
         let mut unique_reserves = deposit_reserves
@@ -539,7 +544,7 @@ impl KlendClient {
                 )
             };
             let (obligation_farm_debt, obligation_farm_coll) =
-                obligation_farms(&self.client, farm_debt, farm_collateral, obligation_address)
+                obligation_farms(&self.local_client, farm_debt, farm_collateral, obligation_address)
                     .await;
 
             if farm_debt != Pubkey::default() && obligation_farm_debt.is_none() {
@@ -582,7 +587,7 @@ impl KlendClient {
             if instruction_reserves.contains(&reserve_acc) {
                 continue;
             }
-            let reserve: Reserve = self.client.get_anchor_account(&reserve_acc).await.unwrap();
+            let reserve: Reserve = *reserves.get(&reserve_acc).unwrap();
             let refresh_reserve_ix = instructions::refresh_reserve_ix(
                 &self.program_id,
                 reserve,
@@ -595,7 +600,7 @@ impl KlendClient {
 
         // 3. Build Refresh Reserve (for the current instruction - i.e. deposit, borrow)
         for reserve_acc in instruction_reserves {
-            let reserve: Reserve = self.client.get_anchor_account(&reserve_acc).await.unwrap();
+            let reserve: Reserve = *reserves.get(&reserve_acc).unwrap();
             let refresh_reserve_ix = instructions::refresh_reserve_ix(
                 &self.program_id,
                 reserve,
@@ -621,11 +626,7 @@ impl KlendClient {
         pre_instructions.push(refresh_obligation_ix);
 
         for (reserve_acc, farm_mode) in reserve_accts.iter().zip(farm_modes.iter()) {
-            let reserve: Reserve = self
-                .client
-                .get_anchor_account(&reserve_acc.key)
-                .await
-                .unwrap();
+            let reserve: Reserve = *reserves.get(&reserve_acc.key).unwrap();
 
             let farm = reserve.get_farm(*farm_mode);
 
@@ -653,6 +654,7 @@ impl KlendClient {
     pub async fn get_obligation_reserves_and_referrer_token_states(
         &self,
         obligation: &Obligation,
+        reserves: &HashMap<Pubkey, Reserve>,
     ) -> (
         Vec<Option<Pubkey>>,
         Vec<Option<Pubkey>>,
@@ -678,11 +680,7 @@ impl KlendClient {
             for borrow_reserve in borrow_reserves.iter() {
                 match borrow_reserve {
                     Some(borrow_reserve) => {
-                        let reserve_account: Reserve = self
-                            .client
-                            .get_anchor_account(borrow_reserve)
-                            .await
-                            .unwrap();
+                        let reserve_account: Reserve = *reserves.get(borrow_reserve).unwrap();
 
                         vec.push(Some(get_referrer_token_state_key(
                             &obligation.referrer,

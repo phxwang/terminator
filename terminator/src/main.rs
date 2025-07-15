@@ -639,6 +639,7 @@ async fn liquidate_with_loaded_data(
                 liquidate_amount,
                 min_acceptable_received_collateral_amount,
                 max_allowed_ltv_override_pct_opt,
+                &reserves
             )
             .await {
                 Ok(ixns) => ixns,
