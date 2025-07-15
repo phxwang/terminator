@@ -162,7 +162,7 @@ impl KlendClient {
 
         if let Some(ref lookup_table) = self.lookup_table {
             if lookup_table.addresses.contains(&account_key) {
-                info!("Account already in lookup table: {:?}", account_key);
+                //info!("Account already in lookup table: {:?}", account_key);
                 return Ok(());
             }
         }
@@ -173,7 +173,7 @@ impl KlendClient {
         };
 
         if custom_lookup_table.addresses.contains(&account_key) {
-            info!("Account already in custom lookup table: {:?}", account_key);
+            //info!("Account already in custom lookup table: {:?}", account_key);
             return Ok(());
         }
 
