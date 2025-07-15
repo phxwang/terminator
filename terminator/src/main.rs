@@ -565,7 +565,7 @@ async fn liquidate_with_loaded_data(
         match total_withdraw_liquidity_amount {
             Some((withdraw_liquidity_amount, protocol_fee)) => {
                 net_withdraw_liquidity_amount = withdraw_liquidity_amount - protocol_fee;
-                info!("Net withdraw liquidity amount: {}", net_withdraw_liquidity_amount);
+                info!("Liquidating: Net withdraw liquidity amount: {}", net_withdraw_liquidity_amount);
             }
             None => {
                 warn!("Total withdraw liquidity amount is None");
@@ -627,6 +627,8 @@ async fn liquidate_with_loaded_data(
         let flash_borrow_instruction_index = ixns.len();
         ixns.extend_from_slice(&flash_borrow_ixns);
 
+        info!("Liquidating: Flash borrow ixns count: {:?}", flash_borrow_ixns.len());
+
         // add liquidate ixns
         let liquidate_ixns = match klend_client
             .liquidate_obligation_and_redeem_reserve_collateral_ixns(
@@ -646,16 +648,23 @@ async fn liquidate_with_loaded_data(
                 }
             };
         ixns.extend_from_slice(&liquidate_ixns);
+        info!("Liquidating: Liquidate ixns count: {:?}", liquidate_ixns.len());
 
         let (jup_ixs, lookup_tables) = match obligation_swap_map.get(&obligation.key) {
             Some(swap_data) => {
                 // TODO: 有可能会有两个swap的instruction，需要适配
                 let mut modified_jup_ixs = swap_data.0.clone();
+                info!("Liquidating: before modify jupiter in amount: {:?}", instruction_parser::parse_instruction_data(&modified_jup_ixs[1].data, &modified_jup_ixs[1].program_id));
+
                 instruction_parser::modify_jupiter_in_amount(&mut modified_jup_ixs[1], net_withdraw_liquidity_amount);
                 instruction_parser::modify_jupiter_out_amount(&mut modified_jup_ixs[1], liquidate_amount);
+
+                info!("Liquidating: Modified jupiter in amount: {:?}", instruction_parser::parse_instruction_data(&modified_jup_ixs[1].data, &modified_jup_ixs[1].program_id));
+
                 (modified_jup_ixs, swap_data.1.clone())
             },
             None => {
+                info!("No swap data found for obligation {}, fetch swap instructions", obligation.key);
                 //add jupiter swap ixns
                 swap::swap_with_jupiter_ixns(
                     klend_client,
@@ -712,12 +721,16 @@ async fn liquidate_with_loaded_data(
             }
         };
 
-        for ix in ixns {
-            info!("Liquidating: Instruction: {:?} {:?}", ix.program_id, ix.data);
-        }
-
         info!("Liquidating: txn.message.address_table_lookups: {:?}", txn.message.address_table_lookups());
+        info!("Liquidating: txn.message.static_account_keys({}): {:?}", txn.message.static_account_keys().len(), txn.message.static_account_keys());
 
+        let static_account_keys = txn.message.static_account_keys();
+        let mut missing_account_keys: HashSet<_> = static_account_keys.iter().cloned().collect();
+        for ix in txn.message.instructions() {
+            let program_id = ix.program_id(static_account_keys);
+            missing_account_keys.remove(&program_id);
+        }
+        info!("Liquidating: missing account keys({}): {:?}", missing_account_keys.len(), missing_account_keys);
 
         match loaded_accounts_data {
             Some(loaded_accounts_data) => {
@@ -1079,7 +1092,10 @@ pub async fn preload_swap_instructions(klend_client: &Arc<KlendClient>, obligati
         }
     };
 
-    obligation_swap_map.insert(*obligation_key, (jup_ixs, lookup_tables));
+    obligation_swap_map.insert(*obligation_key, (jup_ixs.clone(), lookup_tables));
+    info!("Preloaded swap instructions for obligation {} {:?}", obligation_key, jup_ixs.len());
+
+    sleep(Duration::from_secs(2)).await;
 
     Ok(())
 }
@@ -1152,8 +1168,33 @@ async fn scan_obligations(
         let b_obligation = b_obligation.unwrap();
         let a_stats = math::obligation_info(a, a_obligation);
         let b_stats = math::obligation_info(b, b_obligation);
-        let a_score = a_stats.borrowed_amount.to_num::<f64>() / (1.0 - (a_stats.ltv / a_stats.unhealthy_ltv).to_num::<f64>());
-        let b_score = b_stats.borrowed_amount.to_num::<f64>() / (1.0 - (b_stats.ltv / b_stats.unhealthy_ltv).to_num::<f64>());
+
+        // 添加除零检查
+        let a_ratio = if a_stats.unhealthy_ltv > Fraction::ZERO {
+            a_stats.ltv / a_stats.unhealthy_ltv
+        } else {
+            Fraction::ZERO
+        };
+        let b_ratio = if b_stats.unhealthy_ltv > Fraction::ZERO {
+            b_stats.ltv / b_stats.unhealthy_ltv
+        } else {
+            Fraction::ZERO
+        };
+
+        let a_denominator = 1.0 - a_ratio.to_num::<f64>();
+        let b_denominator = 1.0 - b_ratio.to_num::<f64>();
+
+        let a_score = if a_denominator != 0.0 {
+            a_stats.borrowed_amount.to_num::<f64>() / a_denominator
+        } else {
+            f64::INFINITY // 或者其他合适的默认值
+        };
+        let b_score = if b_denominator != 0.0 {
+            b_stats.borrowed_amount.to_num::<f64>() / b_denominator
+        } else {
+            f64::INFINITY
+        };
+
         debug!("{}: {}, {}: {}", a.to_string().green(), a_score, b.to_string().green(), b_score);
         b_score.partial_cmp(&a_score).unwrap_or(std::cmp::Ordering::Equal)
     });
@@ -1161,8 +1202,21 @@ async fn scan_obligations(
     info!("sorted liquidatable_obligations: {:?}", liquidatable_obligations.iter().map(|obligation_key| {
         let obligation = obligation_map.get(obligation_key).unwrap();
         let obligation_stats = math::obligation_info(obligation_key, &obligation);
-        let ratio = obligation_stats.ltv / obligation_stats.unhealthy_ltv;
-        let score = obligation_stats.borrowed_amount.to_num::<f64>() * (1.0 - ratio.to_num::<f64>()) / (1.0 - obligation_stats.unhealthy_ltv.to_num::<f64>());
+
+        // 添加除零检查
+        let ratio = if obligation_stats.unhealthy_ltv > Fraction::ZERO {
+            obligation_stats.ltv / obligation_stats.unhealthy_ltv
+        } else {
+            Fraction::ZERO
+        };
+
+        let unhealthy_ltv_f64 = obligation_stats.unhealthy_ltv.to_num::<f64>();
+        let score = if unhealthy_ltv_f64 != 0.0 && (1.0 - unhealthy_ltv_f64) != 0.0 {
+            obligation_stats.borrowed_amount.to_num::<f64>() * (1.0 - ratio.to_num::<f64>()) / (1.0 - unhealthy_ltv_f64)
+        } else {
+            0.0 // 当分母为0时，使用默认值
+        };
+
         let liquidatable: bool = obligation_stats.ltv > obligation_stats.unhealthy_ltv;
         if liquidatable {
             info!("Liquidatable obligation: {} {:?}", obligation_key.to_string().green(), obligation.to_string());

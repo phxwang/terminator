@@ -193,7 +193,12 @@ pub fn decide_liquidation_strategy(
         )
         .min(full_debt_amount_f);
 
-    let liquidation_ratio = liquidatable_debt / full_debt_amount_f;
+    // 添加除零检查
+    let liquidation_ratio = if full_debt_amount_f > Fraction::ZERO {
+        liquidatable_debt / full_debt_amount_f
+    } else {
+        Fraction::ZERO
+    };
 
     // This is what is possible, liquidatable/repayable debt in lamports and in $ terms
     let liqidatable_amount: u64 = liquidatable_debt.to_num();
@@ -232,7 +237,11 @@ pub fn decide_liquidation_strategy(
         let liquidation_mv = holding_mv.min(liquidable_mv);
 
         // Decide on the final amount
-        let ratio = liquidation_mv / holding_mv;
+        let ratio = if holding_mv != 0.0 {
+            liquidation_mv / holding_mv
+        } else {
+            0.0 // 当分母为0时，使用默认值
+        };
         let swap_amount = (base_holding.balance as f64 * ratio) as u64;
         let liquidate_amount = (liqidatable_amount as f64 * ratio) as u64;
 

@@ -372,6 +372,7 @@ pub async fn dump_accounts_to_file(
             .collect(),
         commitment_or_slot: 0,
     };
+    info!("start dump accounts to file: {:?}, slot: {}", request, slot);
     let response = extra_client.get_multiple_accounts(request).await?;
     let accounts = response.into_inner();
 
