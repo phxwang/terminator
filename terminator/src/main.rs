@@ -709,6 +709,12 @@ async fn liquidate_with_loaded_data(
 
         // TODO: add compute budget + prio fees
         let mut txn = klend_client.local_client.tx_builder().add_ixs(ixns.clone());
+
+        // add custom lookup table
+        if let Some(lut) = klend_client.custom_lookup_table.read().unwrap().clone() {
+            txn = txn.add_lookup_table(lut);
+        }
+
         for lut in luts {
             txn = txn.add_lookup_table(lut);
         }
