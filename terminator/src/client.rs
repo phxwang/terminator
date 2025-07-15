@@ -63,6 +63,8 @@ pub struct KlendClient {
 
     pub custom_lookup_table: RwLock<Option<AddressLookupTableAccount>>,
 
+    pub ata_lookup_table: RwLock<Option<AddressLookupTableAccount>>,
+
     // Rebalance settings
     pub rebalance_config: Option<RebalanceConfig>,
 
@@ -101,6 +103,7 @@ impl KlendClient {
             extra_client,
             lookup_table: None,
             custom_lookup_table: RwLock::new(None),
+            ata_lookup_table: RwLock::new(None),
             liquidator,
             rebalance_config,
         })
@@ -158,6 +161,34 @@ impl KlendClient {
         Ok(map)
     }
 
+    pub async fn check_and_add_to_ata_lookup_table(&self, account_key: Pubkey) -> Result<()> {
+        let ata_lookup_table = {
+            let guard = self.ata_lookup_table.read().unwrap();
+            guard.clone().unwrap()
+        };
+
+        if ata_lookup_table.addresses.contains(&account_key) {
+            //info!("Account already in ata lookup table: {:?}", account_key);
+            return Ok(());
+        }
+
+        info!("Adding account to ata lookup table: {:?}", account_key);
+
+        let mut updated_ata_lookup_table = ata_lookup_table.clone();
+        updated_ata_lookup_table.addresses.push(account_key);
+
+        self.send_extend_lookup_table_transaction(updated_ata_lookup_table.key, account_key).await?;
+
+        // Update the in-memory lookup table after successful transaction
+        {
+            let mut guard = self.ata_lookup_table.write().unwrap();
+            *guard = Some(updated_ata_lookup_table);
+        }
+
+        info!("Added account to ata lookup table: {:?}", account_key);
+        Ok(())
+    }
+
     pub async fn check_and_add_to_custom_lookup_table(&self, account_key: Pubkey) -> Result<()> {
 
         if let Some(ref lookup_table) = self.lookup_table {
@@ -183,9 +214,22 @@ impl KlendClient {
         let mut updated_custom_lookup_table = custom_lookup_table.clone();
         updated_custom_lookup_table.addresses.push(account_key);
 
-        //init tx to add one address to custom lookup table
+        self.send_extend_lookup_table_transaction(updated_custom_lookup_table.key, account_key).await?;
+
+
+        // Update the in-memory lookup table after successful transaction
+        {
+            let mut guard = self.custom_lookup_table.write().unwrap();
+            *guard = Some(updated_custom_lookup_table);
+        }
+
+        info!("Added account to custom lookup table: {:?}", account_key);
+        Ok(())
+    }
+
+    pub async fn send_extend_lookup_table_transaction(&self, lookup_table_key: Pubkey, account_key: Pubkey) -> Result<()> {
         let tx = self.local_client.tx_builder().add_ix(instruction::extend_lookup_table(
-            custom_lookup_table.key,
+            lookup_table_key,
             self.client.payer_pubkey(),
             Some(self.client.payer_pubkey()),
             vec![account_key],
@@ -195,15 +239,10 @@ impl KlendClient {
             .send_retry_and_confirm_transaction(tx, None, false)
             .await?;
 
-        // Update the in-memory lookup table after successful transaction
-        {
-            let mut guard = self.custom_lookup_table.write().unwrap();
-            *guard = Some(updated_custom_lookup_table);
-        }
-
-        info!("Added account to custom lookup table: {} with signature: {:?}", account_key, sig);
+        info!("Sent extend lookup table transaction: {:?}, signature: {:?}", account_key, sig);
         Ok(())
     }
+
 
     pub async fn load_lookup_table(&mut self, market_accounts: MarketAccounts) {
         self.load_liquidator_lookup_table().await;
@@ -220,6 +259,7 @@ impl KlendClient {
     pub async fn load_default_lookup_table(&mut self) {
         self.load_liquidator_lookup_table().await;
         self.load_custom_lookup_table().await;
+        self.load_ata_lookup_table().await;
         self.client
             .add_lookup_table(self.lookup_table.clone().unwrap());
         self.local_client
@@ -240,6 +280,15 @@ impl KlendClient {
         let lookup_table = self.load_lookup_table_from_file(&filename).await.unwrap();
         {
             let mut guard = self.custom_lookup_table.write().unwrap();
+            *guard = lookup_table;
+        }
+    }
+
+    async fn load_ata_lookup_table(&self) {
+        let filename = std::env::var("ATA_LOOKUP_TABLE_FILE").unwrap();
+        let lookup_table = self.load_lookup_table_from_file(&filename).await.unwrap();
+        {
+            let mut guard = self.ata_lookup_table.write().unwrap();
             *guard = lookup_table;
         }
     }

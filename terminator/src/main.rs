@@ -715,6 +715,11 @@ async fn liquidate_with_loaded_data(
             txn = txn.add_lookup_table(lut);
         }
 
+        // add ata lookup table
+        if let Some(lut) = klend_client.ata_lookup_table.read().unwrap().clone() {
+            txn = txn.add_lookup_table(lut);
+        }
+
         for lut in luts {
             txn = txn.add_lookup_table(lut);
         }
@@ -1213,28 +1218,36 @@ async fn scan_obligations(
     });
 
     info!("sorted liquidatable_obligations: {:?}", liquidatable_obligations.iter().map(|obligation_key| {
-        let obligation = obligation_map.get(obligation_key).unwrap();
-        let obligation_stats = math::obligation_info(obligation_key, &obligation);
+        let obligation = obligation_map.get(obligation_key);
+        match obligation {
+            Some(obligation) => {
+                let obligation_stats = math::obligation_info(obligation_key, &obligation);
 
-        // 添加除零检查
-        let ratio = if obligation_stats.unhealthy_ltv > Fraction::ZERO {
-            obligation_stats.ltv / obligation_stats.unhealthy_ltv
-        } else {
-            Fraction::ZERO
-        };
+                // 添加除零检查
+                let ratio = if obligation_stats.unhealthy_ltv > Fraction::ZERO {
+                    obligation_stats.ltv / obligation_stats.unhealthy_ltv
+                } else {
+                    Fraction::ZERO
+                };
 
-        let unhealthy_ltv_f64 = obligation_stats.unhealthy_ltv.to_num::<f64>();
-        let score = if unhealthy_ltv_f64 != 0.0 && (1.0 - unhealthy_ltv_f64) != 0.0 {
-            obligation_stats.borrowed_amount.to_num::<f64>() * (1.0 - ratio.to_num::<f64>()) / (1.0 - unhealthy_ltv_f64)
-        } else {
-            0.0 // 当分母为0时，使用默认值
-        };
+                let unhealthy_ltv_f64 = obligation_stats.unhealthy_ltv.to_num::<f64>();
+                let score = if unhealthy_ltv_f64 != 0.0 && (1.0 - unhealthy_ltv_f64) != 0.0 {
+                    obligation_stats.borrowed_amount.to_num::<f64>() * (1.0 - ratio.to_num::<f64>()) / (1.0 - unhealthy_ltv_f64)
+                } else {
+                    0.0 // 当分母为0时，使用默认值
+                };
 
-        let liquidatable: bool = obligation_stats.ltv > obligation_stats.unhealthy_ltv;
-        if liquidatable {
-            info!("Liquidatable obligation: {} {:?}", obligation_key.to_string().green(), obligation.to_string());
+                let liquidatable: bool = obligation_stats.ltv > obligation_stats.unhealthy_ltv;
+                if liquidatable {
+                    info!("Liquidatable obligation: {} {:?}", obligation_key.to_string().green(), obligation.to_string());
+                }
+                (*obligation_key, liquidatable, ratio.to_num::<f64>(), score, obligation_stats.borrowed_amount.to_num::<f64>(), obligation_stats.deposited_amount.to_num::<f64>())
+            }
+            None => {
+                (*obligation_key, false, 0.0, 0.0, 0.0, 0.0)
+            }
         }
-        (*obligation_key, liquidatable, ratio.to_num::<f64>(), score, obligation_stats.borrowed_amount.to_num::<f64>(), obligation_stats.deposited_amount.to_num::<f64>())
+
     }).collect::<Vec<(Pubkey, bool, f64, f64, f64, f64)>>());
 
 
