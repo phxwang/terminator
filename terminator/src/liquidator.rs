@@ -269,6 +269,7 @@ async fn get_or_create_atas(
                 }
             }
         }
+        client.check_and_add_to_ata_lookup_table(*ata).await?;
     }
 
     Ok(existing_atas)
