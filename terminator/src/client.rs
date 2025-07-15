@@ -61,6 +61,8 @@ pub struct KlendClient {
     // Txn data
     pub lookup_table: Option<AddressLookupTableAccount>,
 
+    pub custom_lookup_table: Option<AddressLookupTableAccount>,
+
     // Rebalance settings
     pub rebalance_config: Option<RebalanceConfig>,
 
@@ -98,6 +100,7 @@ impl KlendClient {
             local_client,
             extra_client,
             lookup_table: None,
+            custom_lookup_table: None,
             liquidator,
             rebalance_config,
         })
@@ -169,6 +172,7 @@ impl KlendClient {
 
     pub async fn load_default_lookup_table(&mut self) {
         self.load_liquidator_lookup_table().await;
+        self.load_custom_lookup_table().await;
         self.client
             .add_lookup_table(self.lookup_table.clone().unwrap());
         self.local_client
@@ -180,8 +184,17 @@ impl KlendClient {
         // and is stored on a local file
         // Here we load it or create it and save it
         // we do not manage the addresses, that is done in a separate stage
-
         let filename = std::env::var("LIQUIDATOR_LOOKUP_TABLE_FILE").unwrap();
+        self.lookup_table = self.load_lookup_table_from_file(&filename).await.unwrap();
+    }
+
+    async fn load_custom_lookup_table(&mut self) {
+        let filename = std::env::var("CUSTOM_LOOKUP_TABLE_FILE").unwrap();
+        self.custom_lookup_table = self.load_lookup_table_from_file(&filename).await.unwrap();
+    }
+
+
+    async fn load_lookup_table_from_file(&mut self, filename: &str) -> Result<Option<AddressLookupTableAccount>> {
 
         if !std::path::Path::new(&filename).exists() {
             File::create(&filename).unwrap();
@@ -195,6 +208,8 @@ impl KlendClient {
         let mut current_content = String::new();
         file.read_to_string(&mut current_content).unwrap();
 
+        let mut lookup_table = None;
+
         if current_content.is_empty() {
             let lut = self
                 .create_init_reserve_lookup_table(&[], || {
@@ -202,20 +217,21 @@ impl KlendClient {
                 })
                 .await
                 .unwrap();
-            self.lookup_table = Some(lut.clone());
+            lookup_table = Some(lut.clone());
             file.set_len(0).unwrap();
             file.write_all(lut.key.to_string().as_bytes()).unwrap();
             info!("Created new empty lookup table {}", lut.key);
+
         } else {
             let lut_key = Pubkey::from_str(&current_content).unwrap();
             info!("Liquidator lookuptable {:?}", lut_key);
             let lookup_table_data = self.client.client.get_account(&lut_key).await.unwrap();
-            let lookup_table: UiLookupTable = UiLookupTable::from(
+            let ui_lookup_table: UiLookupTable = UiLookupTable::from(
                 AddressLookupTable::deserialize(&lookup_table_data.data).unwrap(),
             );
-            self.lookup_table = Some(AddressLookupTableAccount {
+            lookup_table = Some(AddressLookupTableAccount {
                 key: lut_key,
-                addresses: lookup_table
+                addresses: ui_lookup_table
                     .addresses
                     .iter()
                     .map(|x| Pubkey::from_str(x).unwrap())
@@ -224,9 +240,11 @@ impl KlendClient {
             info!(
                 "Loaded lookup table {} with {} keys",
                 lut_key,
-                lookup_table.addresses.len()
+                ui_lookup_table.addresses.len()
             );
         }
+
+        Ok(lookup_table)
     }
 
     async fn update_liquidator_lookup_table(&mut self, expected: HashSet<Pubkey>) {
