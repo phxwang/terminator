@@ -255,12 +255,12 @@ async fn main() -> Result<()> {
     info!("Initializing client..");
     let mut klend_client = config::get_client_for_action(&args).await?;
 
+    klend_client.load_default_lookup_table().await;
+
     if klend_client.liquidator.atas.is_empty() {
         info!("Liquidator ATAs are empty, loading...");
         klend_client.liquidator = Liquidator::init(&klend_client).await?;
     }
-
-    klend_client.load_default_lookup_table().await;
 
     let klend_client = Arc::new(klend_client);
 

@@ -126,6 +126,8 @@ pub async fn market_and_reserve_accounts(
 
     let reserves: HashMap<Pubkey, Reserve> = res.into_iter().collect();
 
+    info!("load {} reserves from market: {}", reserves.len(), lending_market);
+
     for reserve_key in reserves.keys() {
         client.check_and_add_to_custom_lookup_table(*reserve_key).await?;
     }
