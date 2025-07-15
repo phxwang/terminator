@@ -449,6 +449,39 @@ pub fn load_competitors_from_file() -> Result<Vec<Pubkey>> {
     Ok(competitors)
 }
 
+pub async fn create_new_lookup_tables_account(klend_client: &Arc<KlendClient>) -> Result<()> {
+    use solana_sdk::address_lookup_table::instruction;
+    use solana_sdk::commitment_config::CommitmentConfig;
+
+    //在链上新建一个lookup table account
+    let recent_slot = klend_client
+        .client
+        .client
+        .get_slot_with_commitment(CommitmentConfig::finalized())
+        .await?;
+
+    let (create_lookup_table_ix, table_pubkey) = instruction::create_lookup_table(
+        klend_client.client.payer_pubkey(),
+        klend_client.client.payer_pubkey(),
+        recent_slot,
+    );
+
+    let tx = klend_client
+        .client
+        .tx_builder()
+        .add_ix(create_lookup_table_ix)
+        .build(&[])
+        .await?;
+
+    let (sig, _) = klend_client
+        .client
+        .send_retry_and_confirm_transaction(tx, None, false)
+        .await?;
+
+    info!("Created new lookup table account: {} with signature: {:?}", table_pubkey, sig);
+    Ok(())
+}
+
 pub async fn load_obligations_map(scope: String) -> Result<HashMap<Pubkey, Vec<Pubkey>>, std::result::Result<(), anyhow::Error>> {
     let file_path = format!("{}.json", scope);
     if !Path::new(&file_path).exists() {

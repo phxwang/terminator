@@ -22,7 +22,7 @@ use extra_proto::{Replace, SimulateTransactionRequest};
 
 
 use crate::{
-    accounts::{map_accounts_and_create_infos, oracle_accounts, OracleAccounts, MarketAccounts, account_update_ws, dump_accounts_to_file, refresh_oracle_keys, load_obligations_map},
+    accounts::{map_accounts_and_create_infos, oracle_accounts, OracleAccounts, MarketAccounts, account_update_ws, dump_accounts_to_file, refresh_oracle_keys, load_obligations_map, create_new_lookup_tables_account},
     client::KlendClient,
     config::get_lending_markets,
     jupiter::get_best_swap_instructions,
@@ -197,6 +197,11 @@ pub enum Actions {
         #[clap(flatten)]
         rebalance_args: RebalanceArgs,
     },
+    #[clap()]
+    CreateLookupTable {
+        #[clap(flatten)]
+        rebalance_args: RebalanceArgs,
+    },
 }
 
 #[tokio::main]
@@ -281,6 +286,7 @@ async fn main() -> Result<()> {
         } => swap::swap_action(&klend_client, from, to, amount, slippage_pct).await,
         Actions::LoopLiquidate { scope, rebalance_args: _ } => loop_liquidate(&klend_client, scope).await,
         Actions::StreamLiquidate { scope, rebalance_args: _ } => stream_liquidate(&klend_client, scope).await,
+        Actions::CreateLookupTable { rebalance_args: _ } => create_lookup_table(&klend_client).await,
     }
 }
 
@@ -1713,5 +1719,12 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
     let en_refresh_reserves = start.elapsed().as_secs_f64();
     debug!("Refreshing market reserves {} time used: {}s", market.to_string().green(), en_refresh_reserves);
 
+    Ok(())
+}
+
+async fn create_lookup_table(klend_client: &Arc<KlendClient>) -> Result<()> {
+    info!("Creating new lookup table account...");
+    create_new_lookup_tables_account(klend_client).await?;
+    info!("Successfully created new lookup table account");
     Ok(())
 }
