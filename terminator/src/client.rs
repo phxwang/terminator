@@ -535,7 +535,7 @@ impl KlendClient {
         let instruction_reserves = reserve_accts.iter().map(|x| x.key).collect::<Vec<Pubkey>>();
 
         // 1. Build init_obligation_farm if necessary
-        for reserve in reserve_accts {
+        /*for reserve in reserve_accts {
             let (farm_debt, farm_collateral) = {
                 let reserve_state = reserve.state.borrow();
                 (
@@ -557,7 +557,7 @@ impl KlendClient {
                     payer,
                     ReserveFarmKind::Debt,
                 );
-                println!(
+                info!(
                     "Adding pre-ixn init_obligation_farm_ix current {:?} debt ",
                     farm_debt
                 );
@@ -574,13 +574,13 @@ impl KlendClient {
                     payer,
                     ReserveFarmKind::Collateral,
                 );
-                println!(
+                info!(
                     "Adding pre-ixn init_obligation_farm_ix current {:?} coll",
                     farm_collateral
                 );
                 pre_instructions.push(init_obligation_farm_ix.clone());
             }
-        }
+        }*/
 
         // 2. Build Refresh Reserve (for the non-instruction reserves - i.e. deposit, borrow)
         for reserve_acc in unique_reserves {
@@ -594,7 +594,7 @@ impl KlendClient {
                 &reserve_acc,
                 payer.clone(),
             );
-            println!("Adding pre-ixn refresh_reserve unique {:?}", reserve_acc);
+            info!("Adding pre-ixn refresh_reserve unique {:?}", reserve_acc);
             pre_instructions.push(refresh_reserve_ix);
         }
 
@@ -607,7 +607,7 @@ impl KlendClient {
                 &reserve_acc,
                 payer.clone(),
             );
-            println!("Adding pre-ixn refresh_reserve current {:?}", reserve_acc);
+            info!("Adding pre-ixn refresh_reserve current {:?}", reserve_acc);
             pre_instructions.push(refresh_reserve_ix);
         }
 
@@ -622,7 +622,7 @@ impl KlendClient {
             payer.clone(),
         );
 
-        println!("Adding pre-ixn refresh_obligation");
+        info!("Adding pre-ixn refresh_obligation");
         pre_instructions.push(refresh_obligation_ix);
 
         for (reserve_acc, farm_mode) in reserve_accts.iter().zip(farm_modes.iter()) {
@@ -641,7 +641,7 @@ impl KlendClient {
                     *farm_mode,
                 );
 
-                println!("pre_ixs refresh_obligation_farms {:?}", farm);
+                info!("pre_ixs refresh_obligation_farms {:?}", farm);
 
                 pre_instructions.push(refresh_farms_ix.clone());
                 post_instructions.push(refresh_farms_ix);
