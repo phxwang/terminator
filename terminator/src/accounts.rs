@@ -35,9 +35,8 @@ use crate::{
     consts::WRAPPED_SOL_MINT,
     yellowstone_transaction::create_yellowstone_client,
     refresh_market,
-    scan_obligations,
+    liquidation_engine::LiquidationEngine,
     sysvars,
-    preload_swap_instructions,
 };
 
 // Local types for scope price functionality
@@ -546,7 +545,7 @@ pub async fn account_update_ws(
 
 
     let obligation_map: Arc<RwLock<HashMap<Pubkey, Obligation>>> = Arc::new(RwLock::new(HashMap::new()));
-    let mut obligation_swap_map: HashMap<Pubkey, (Vec<Instruction>, Option<Vec<AddressLookupTableAccount>>)> = HashMap::new();
+    let mut liquidation_engine = LiquidationEngine::new();
     let mut obligation_reservers_to_refresh: Vec<Pubkey> = vec![];
 
     let mut accounts = HashMap::new();
@@ -653,7 +652,7 @@ pub async fn account_update_ws(
                             obligation_map_write.insert(pubkey, obligation);
                             info!("Obligation updated: {:?}, obligation: {:?}", pubkey, obligation);
 
-                            if let Err(e) = preload_swap_instructions(klend_client, &pubkey, &obligation, &all_reserves, &mut obligation_swap_map).await {
+                            if let Err(e) = liquidation_engine.preload_swap_instructions(klend_client, &pubkey, &obligation, &all_reserves).await {
                                 error!("Failed to preload swap instructions for obligation {}: {}", pubkey, e);
                             }
                             continue;
@@ -732,10 +731,7 @@ pub async fn account_update_ws(
                             };
 
                             let mut obligation_map_write = obligation_map.write().unwrap();
-                            let checked_obligation_count = scan_obligations(klend_client,
-                                &mut obligation_map_write,
-                                &mut obligation_swap_map,
-                                &mut obligation_reservers_to_refresh,
+                            let checked_obligation_count = liquidation_engine.scan_obligations(klend_client,
                                 &clock,
                                 obligations,
                                 all_reserves,
