@@ -3105,7 +3105,6 @@ dependencies = [
  "solana-sdk",
  "spl-associated-token-account",
  "spl-token 3.5.0",
- "spl-token-2022 1.0.0",
  "spl-token-client",
  "static-pubkey",
  "strum 0.24.0 (git+https://github.com/hubbleprotocol/strum?branch=checked_arithmetics)",
