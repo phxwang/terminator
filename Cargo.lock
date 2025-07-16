@@ -3097,7 +3097,6 @@ dependencies = [
  "nohash-hasher",
  "num_enum 0.5.11",
  "orbit-link",
- "scope-types 1.0.0 (git+https://github.com/Kamino-Finance/scope?branch=anchor_0.29_idl)",
  "serde",
  "serde_json",
  "solana-account-decoder",

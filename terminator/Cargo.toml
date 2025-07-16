@@ -39,7 +39,7 @@ bytemuck = { version="1.4.0", features=["min_const_generics", "derive"] }
 anchor-lang = "0.29.0"
 anchor-spl = { version = "0.29.0", features = ["dex", "token"] }
 num_enum = "0.5.0"
-scope = { git = "https://github.com/Kamino-Finance/scope", branch = "anchor_0.29_idl", package = "scope-types" }
+#scope = { git = "https://github.com/Kamino-Finance/scope", branch = "anchor_0.29_idl", package = "scope-types" }
 strum = { git = "https://github.com/hubbleprotocol/strum", features = [
     "derive",
 ], branch = "checked_arithmetics" }
