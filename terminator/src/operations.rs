@@ -105,7 +105,7 @@ pub fn refresh_reserve<'a>(
             switchboard_price_oracle,
             switchboard_twap_oracle,
             scope_prices,
-            clock.unix_timestamp,
+            &clock,
         )?;
 
         kamino_lending::lending_market::lending_operations::refresh_reserve(
@@ -254,11 +254,13 @@ pub async fn refresh_reserves_and_obligation(
     )?;
 
     kamino_lending::lending_market::lending_operations::refresh_obligation(
+        obligation_addr,
         obligation_state,
         lending_market,
         clock.slot,
-        deposit_reserves.into_iter(),
+        kamino_lending::MaxReservesAsCollateralCheck::Skip,
         borrow_reserves.into_iter(),
+        deposit_reserves.into_iter(),
         referrer_states.into_iter(),
     )?;
     Ok(all_oracle_keys)
