@@ -693,10 +693,11 @@ impl LiquidationEngine {
             //only refresh reserves in obligations
             let refresh_start = std::time::Instant::now();
             {
+                let obligation_reservers_to_refresh = self.obligation_reservers_to_refresh.clone();
                 let (reserves, lending_market, _rts) = self.market_accounts_map.get_mut(&market_pubkey).unwrap();
-                match self.refresh_market(klend_client,
+                match crate::refresh_market(klend_client,
                     &market_pubkey,
-                    &self.obligation_reservers_to_refresh,
+                    &obligation_reservers_to_refresh,
                     reserves,
                     lending_market,
                     &clock,
@@ -715,7 +716,10 @@ impl LiquidationEngine {
 
             {
                 let (reserves, lending_market, rts) = self.market_accounts_map.get(&market_pubkey).unwrap();
-                self.scan_obligations(klend_client, &clock, liquidatable_obligations, reserves, lending_market, rts, None).await;
+                let reserves = reserves.clone();
+                let lending_market = lending_market.clone();
+                let rts = rts.clone();
+                self.scan_obligations(klend_client, &clock, liquidatable_obligations, &reserves, &lending_market, &rts, None).await;
             }
         }
         let en = start.elapsed().as_secs_f64();
@@ -812,10 +816,11 @@ impl LiquidationEngine {
                 continue;
             }
 
-            if let Some(obligation) = self.obligation_map.get_mut(&address) {
-                if let Err(e) = self.check_and_liquidate(klend_client, &address, obligation, &lending_market, clock, &reserves, &rts).await {
+            if let Some(mut obligation) = self.obligation_map.remove(&address) {
+                if let Err(e) = self.check_and_liquidate(klend_client, &address, &mut obligation, &lending_market, clock, &reserves, &rts).await {
                     error!("[Liquidation Thread] Error checking/liquidating obligation {}: {}", address, e);
                 }
+                self.obligation_map.insert(*address, obligation);
                 checked_obligation_count += 1;
             } else {
                 match klend_client.fetch_obligation(&address).await {
@@ -992,8 +997,8 @@ impl LiquidationEngine {
 
     async fn refresh_market(&self, klend_client: &Arc<KlendClient>, market: &Pubkey, obligation_reservers_to_refresh: &Vec<Pubkey>,
         reserves: &mut HashMap<Pubkey, Reserve>, lending_market: &mut LendingMarket, clock: &Clock,
-        mut scope_price_accounts: Option<&mut Vec<(Pubkey, bool, Account)>>,
-        mut switchboard_accounts: Option<&mut Vec<(Pubkey, bool, Account)>>,
+        scope_price_accounts: Option<&mut Vec<(Pubkey, bool, Account)>>,
+        switchboard_accounts: Option<&mut Vec<(Pubkey, bool, Account)>>,
         updated_account_data: Option<&HashMap<Pubkey, Vec<u8>>>)
     -> Result<()> {
         // This method is a simplified version that delegates to the main refresh_market function

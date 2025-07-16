@@ -14,7 +14,7 @@ use anchor_client::{
     solana_sdk::{account::Account, account_info::AccountInfo, pubkey::Pubkey, signer::Signer},
 };
 use anchor_lang::{Id, AccountDeserialize, Discriminator};
-use solana_sdk::{clock::Clock, sysvar::SysvarId, bs58, instruction::Instruction, address_lookup_table::{AddressLookupTableAccount, instruction}};
+use solana_sdk::{clock::Clock, sysvar::SysvarId, bs58, address_lookup_table::instruction};
 use anchor_spl::token::Token;
 use anyhow::Result;
 use futures::SinkExt;
@@ -546,7 +546,7 @@ pub async fn account_update_ws(
 
     let obligation_map: Arc<RwLock<HashMap<Pubkey, Obligation>>> = Arc::new(RwLock::new(HashMap::new()));
     let mut liquidation_engine = LiquidationEngine::new();
-    let mut obligation_reservers_to_refresh: Vec<Pubkey> = vec![];
+    let _obligation_reservers_to_refresh: Vec<Pubkey> = vec![];
 
     let mut accounts = HashMap::new();
     let account_filter = pubkeys.iter().map(|key| key.to_string()).collect::<Vec<String>>();
@@ -730,7 +730,7 @@ pub async fn account_update_ws(
                                 }
                             };
 
-                            let mut obligation_map_write = obligation_map.write().unwrap();
+                            let _obligation_map_write = obligation_map.write().unwrap();
                             let checked_obligation_count = liquidation_engine.scan_obligations(klend_client,
                                 &clock,
                                 obligations,

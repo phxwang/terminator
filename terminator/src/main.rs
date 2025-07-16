@@ -27,8 +27,8 @@ use crate::{
     liquidator::{Holdings, Liquidator},
     liquidation_engine::LiquidationEngine,
     operations::{
-        obligation_reserves, referrer_token_states_of_obligation, split_obligations,
-        ObligationReserves, SplitObligations,
+        split_obligations,
+        SplitObligations,
     },
     px::fetch_jup_prices,
     utils::get_all_reserve_mints,
