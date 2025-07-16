@@ -935,11 +935,13 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>,
     obligation_reserve_keys.extend(deposit_reserves.iter().map(|d| d.key).collect::<Vec<_>>());
 
     if let Err(e) = kamino_lending::lending_market::lending_operations::refresh_obligation(
+        &address,
         obligation,
         &lending_market,
         clock.slot,
-        deposit_reserves.into_iter(),
+        kamino_lending::MaxReservesAsCollateralCheck::Skip,
         borrow_reserves.into_iter(),
+        deposit_reserves.into_iter(),
         referrer_states.into_iter(),
     ) {
         error!("[Liquidation Thread] Error refreshing obligation {}: {}", address, e);
@@ -1486,11 +1488,13 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
                 };
 
                 if let Err(e) = kamino_lending::lending_market::lending_operations::refresh_obligation(
+                    &address,
                     obligation,
                     &lending_market,
                     clock.slot,
-                    deposit_reserves.into_iter(),
+                    kamino_lending::MaxReservesAsCollateralCheck::Skip,
                     borrow_reserves.into_iter(),
+                    deposit_reserves.into_iter(),
                     referrer_states.into_iter(),
                 ) {
                     error!("Error refreshing obligation {}: {}", address, e);
@@ -1595,9 +1599,10 @@ async fn refresh_market(klend_client: &Arc<KlendClient>, market: &Pubkey,  oblig
     //let rts = klend_client.fetch_referrer_token_states().await?;
     //let mut reserves = market_accs.reserves.clone();
     // let mut lending_market = market_accs.lending_market;
-    if lending_market.global_unhealthy_borrow_value == 0 {
-        lending_market.global_unhealthy_borrow_value = lending_market.global_allowed_borrow_value;
-    }
+    // Note: global_unhealthy_borrow_value field was removed/renamed in kamino_lending update
+    // if lending_market.global_allowed_borrow_value == 0 {
+    //     lending_market.global_allowed_borrow_value = lending_market.global_allowed_borrow_value;
+    // }
 
     //let en_rts = start.elapsed().as_secs_f64();
     //info!("Refreshing market referrer token states {} time used: {}s", market.to_string().green(), en_rts);

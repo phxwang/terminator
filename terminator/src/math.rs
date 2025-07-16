@@ -135,6 +135,7 @@ pub fn get_liquidatable_amount(
             debt_liquidity,
             user_ltv,
             lending_market.insolvency_risk_unhealthy_ltv_pct,
+            kamino_lending::LiquidationReason::LtvExceeded,
         )
         .min(full_debt_amount_f);
 
@@ -190,6 +191,7 @@ pub fn decide_liquidation_strategy(
             debt_liquidity,
             user_ltv,
             lending_market.insolvency_risk_unhealthy_ltv_pct,
+            kamino_lending::LiquidationReason::LtvExceeded,
         )
         .min(full_debt_amount_f);
 

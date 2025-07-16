@@ -920,11 +920,13 @@ impl KlendClient {
         )?;
 
         kamino_lending::lending_market::lending_operations::refresh_obligation(
+            &obligation,
             &mut obligation_state,
             &market,
             clock.slot,
-            deposit_reserves.into_iter(),
+            kamino_lending::MaxReservesAsCollateralCheck::Perform,
             borrow_reserves.into_iter(),
+            deposit_reserves.into_iter(),
             referrer_states.into_iter(),
         )?;
 
