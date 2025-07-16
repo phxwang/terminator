@@ -1221,22 +1221,8 @@ async fn scan_obligations(
             Fraction::ZERO
         };
 
-        let a_denominator = 1.0 - a_ratio.to_num::<f64>();
-        let b_denominator = 1.0 - b_ratio.to_num::<f64>();
-
-        let a_score = if a_denominator != 0.0 {
-            a_stats.borrowed_amount.to_num::<f64>() / a_denominator
-        } else {
-            f64::INFINITY // 或者其他合适的默认值
-        };
-        let b_score = if b_denominator != 0.0 {
-            b_stats.borrowed_amount.to_num::<f64>() / b_denominator
-        } else {
-            f64::INFINITY
-        };
-
-        debug!("{}: {}, {}: {}", a.to_string().green(), a_score, b.to_string().green(), b_score);
-        b_score.partial_cmp(&a_score).unwrap_or(std::cmp::Ordering::Equal)
+        debug!("{}: {}, {}: {}", a.to_string().green(), a_ratio, b.to_string().green(), b_ratio);
+        b_ratio.partial_cmp(&a_ratio).unwrap_or(std::cmp::Ordering::Equal)
     });
 
     info!("sorted liquidatable_obligations: {:?}", liquidatable_obligations.iter().map(|obligation_key| {
@@ -1252,25 +1238,18 @@ async fn scan_obligations(
                     Fraction::ZERO
                 };
 
-                let unhealthy_ltv_f64 = obligation_stats.unhealthy_ltv.to_num::<f64>();
-                let score = if unhealthy_ltv_f64 != 0.0 && (1.0 - unhealthy_ltv_f64) != 0.0 {
-                    obligation_stats.borrowed_amount.to_num::<f64>() * (1.0 - ratio.to_num::<f64>()) / (1.0 - unhealthy_ltv_f64)
-                } else {
-                    0.0 // 当分母为0时，使用默认值
-                };
-
                 let liquidatable: bool = obligation_stats.ltv > obligation_stats.unhealthy_ltv;
                 if liquidatable {
                     info!("Liquidatable obligation: {} {:?}", obligation_key.to_string().green(), obligation.to_string());
                 }
-                (*obligation_key, liquidatable, ratio.to_num::<f64>(), score, obligation_stats.borrowed_amount.to_num::<f64>(), obligation_stats.deposited_amount.to_num::<f64>())
+                (*obligation_key, liquidatable, ratio.to_num::<f64>(), obligation_stats.borrowed_amount.to_num::<f64>(), obligation_stats.deposited_amount.to_num::<f64>())
             }
             None => {
-                (*obligation_key, false, 0.0, 0.0, 0.0, 0.0)
+                (*obligation_key, false, 0.0, 0.0, 0.0)
             }
         }
 
-    }).collect::<Vec<(Pubkey, bool, f64, f64, f64, f64)>>());
+    }).collect::<Vec<(Pubkey, bool, f64, f64, f64)>>());
 
 
     checked_obligation_count
