@@ -925,8 +925,8 @@ impl KlendClient {
             &market,
             clock.slot,
             kamino_lending::MaxReservesAsCollateralCheck::Perform,
-            borrow_reserves.into_iter(),
             deposit_reserves.into_iter(),
+            borrow_reserves.into_iter(),
             referrer_states.into_iter(),
         )?;
 

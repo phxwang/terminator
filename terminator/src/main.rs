@@ -940,8 +940,8 @@ async fn check_and_liquidate(klend_client: &Arc<KlendClient>,
         &lending_market,
         clock.slot,
         kamino_lending::MaxReservesAsCollateralCheck::Skip,
-        borrow_reserves.into_iter(),
         deposit_reserves.into_iter(),
+        borrow_reserves.into_iter(),
         referrer_states.into_iter(),
     ) {
         error!("[Liquidation Thread] Error refreshing obligation {}: {}", address, e);
@@ -1493,8 +1493,8 @@ async fn crank(klend_client: &Arc<KlendClient>, obligation_filter: Option<Pubkey
                     &lending_market,
                     clock.slot,
                     kamino_lending::MaxReservesAsCollateralCheck::Skip,
-                    borrow_reserves.into_iter(),
                     deposit_reserves.into_iter(),
+                    borrow_reserves.into_iter(),
                     referrer_states.into_iter(),
                 ) {
                     error!("Error refreshing obligation {}: {}", address, e);
