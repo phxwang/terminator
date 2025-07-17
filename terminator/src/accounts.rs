@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter};
@@ -13,30 +13,22 @@ use anchor_client::{
     },
     solana_sdk::{account::Account, account_info::AccountInfo, pubkey::Pubkey, signer::Signer},
 };
-use anchor_lang::{Id, AccountDeserialize, Discriminator};
-use solana_sdk::{clock::Clock, sysvar::SysvarId, bs58, address_lookup_table::instruction};
+use anchor_lang::Id;
+use solana_sdk::address_lookup_table::instruction;
 use anchor_spl::token::Token;
 use anyhow::Result;
-use futures::SinkExt;
-use futures_util::stream::StreamExt;
-use kamino_lending::{LendingMarket, Reserve, Obligation, ReferrerTokenState};
+use kamino_lending::{LendingMarket, Reserve, Obligation};
 use scope::OraclePrices as ScopePrices;
 use orbit_link::{async_client::AsyncClient, OrbitLink};
 use spl_associated_token_account::instruction::create_associated_token_account;
-use tracing::{info, debug, error};
-use yellowstone_grpc_proto::prelude::{SubscribeRequest, SubscribeRequestFilterAccounts, SubscribeRequestFilterTransactions, subscribe_update::UpdateOneof};
-use yellowstone_grpc_proto::geyser::CommitmentLevel;
-use yellowstone_grpc_proto::tonic;
+use tracing::{info, error};
 use tokio::time::sleep;
 use extra_proto::GetMultipleAccountsRequest;
+use yellowstone_grpc_proto::tonic;
 
 use crate::{
     client::{rpc, KlendClient},
     consts::WRAPPED_SOL_MINT,
-    yellowstone_transaction::create_yellowstone_client,
-    refresh_market,
-    liquidation_engine::LiquidationEngine,
-    sysvars,
 };
 
 // Local types for scope price functionality
@@ -51,7 +43,7 @@ pub struct TimestampedPrice {
 }
 
 // Local implementation of get_price_usd function
-fn get_price_usd(
+pub fn get_price_usd(
     scope_prices: &ScopePrices,
     tokens_chain: ScopeConversionChain,
 ) -> Option<TimestampedPrice> {
@@ -520,313 +512,4 @@ pub async fn load_obligations_map(scope: String) -> Result<HashMap<Pubkey, Vec<P
     Ok(obligations_map)
 }
 
-pub async fn account_update_ws(
-    klend_client: &Arc<KlendClient>,
-    scope: String,
-    market_pubkeys: &Vec<Pubkey>,
-    market_obligations_map: &mut HashMap<Pubkey, Vec<Pubkey>>,
-    all_scope_price_accounts: &mut Vec<(Pubkey, bool, Account)>,
-    all_switchboard_accounts: &mut Vec<(Pubkey, bool, Account)>,
-    all_reserves: &mut HashMap<Pubkey, Reserve>,
-    all_lending_market: &mut HashMap<Pubkey, LendingMarket>,
-    all_rts: &mut HashMap<Pubkey, HashMap<Pubkey, ReferrerTokenState>>,
-) -> anyhow::Result<()> {
 
-    // Collect all scope price account keys
-    let scope_price_pubkeys = all_scope_price_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
-    let switchboard_pubkeys = all_switchboard_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
-    let mut all_obligations_pubkeys = market_obligations_map.values().flatten().copied().collect::<Vec<Pubkey>>();
-    let mut pubkeys: Vec<Pubkey> = HashSet::<Pubkey>::from_iter([scope_price_pubkeys.clone(), switchboard_pubkeys, all_obligations_pubkeys.clone()].concat()).into_iter().collect();
-    pubkeys.push(Clock::id());
-    info!("account update ws: {:?}", pubkeys);
-
-    let competitors = load_competitors_from_file()?;
-    info!("competitors: {:?}", competitors);
-
-
-    let obligation_map: Arc<RwLock<HashMap<Pubkey, Obligation>>> = Arc::new(RwLock::new(HashMap::new()));
-    let mut liquidation_engine = LiquidationEngine::new();
-    let _obligation_reservers_to_refresh: Vec<Pubkey> = vec![];
-
-    let mut accounts = HashMap::new();
-    let account_filter = pubkeys.iter().map(|key| key.to_string()).collect::<Vec<String>>();
-    accounts.insert(
-        "client".to_string(),
-        SubscribeRequestFilterAccounts {
-            account: account_filter,
-            owner: vec![],
-            filters: vec![],
-        },
-    );
-
-    let transactions_filter = competitors.iter().map(|key| key.to_string()).collect::<Vec<String>>();
-    let mut transactions = HashMap::new();
-    transactions.insert(
-        "transactions".to_string(),
-        SubscribeRequestFilterTransactions {
-            account_required: transactions_filter,
-            vote: Some(false),
-            failed: Some(false),
-            ..Default::default()
-        },
-    );
-
-    let endpoint = "ws://198.244.253.218:10000".to_string();
-    let x_token = None;
-
-    let mut client = create_yellowstone_client(&endpoint, &x_token, 10).await?;
-    let (mut subscribe_tx, mut stream) = client.subscribe().await.map_err(|e| {
-        anyhow::Error::msg(format!(
-            "Failed to subscribe: {} ({})",
-            endpoint, e
-        ))
-    })?;
-    info!("Connected to the gRPC server");
-    subscribe_tx
-        .send(SubscribeRequest {
-            slots: HashMap::new(),
-            accounts,
-            transactions: transactions.clone(),
-            blocks: HashMap::new(),
-            blocks_meta: HashMap::new(),
-            commitment: Some(CommitmentLevel::Processed.into()),
-            accounts_data_slice: vec![],
-            transactions_status: HashMap::new(),
-            ping: None,
-            entry: HashMap::new(),
-        })
-        .await
-        .map_err(|e| {
-            anyhow::Error::msg(format!(
-                "Failed to send: {} ({})",
-                endpoint, e
-            ))
-        })?;
-
-    let mut reserves_prices: HashMap<Pubkey, TimestampedPrice> = HashMap::new();
-
-    let mut clock = match sysvars::clock(&klend_client.local_client.client).await {
-        Ok(clock) => clock,
-        Err(_e) => {
-            error!("Failed to get clock");
-            return Err(anyhow::Error::msg("Failed to get clock"));
-        }
-    };
-
-    while let Some(message) = stream.next().await {
-        if let Ok(msg) = message {
-            match msg.update_oneof {
-                Some(UpdateOneof::Account(account)) => {
-
-                    let account = account.account;
-
-                    if let Some(account) = account {
-                        let pubkey = Pubkey::try_from(account.pubkey.as_slice()).unwrap();
-                        let data = account.data;
-                        if pubkey == Clock::id() {
-                            //update clock from account
-                            let account_data = Account {
-                                lamports: account.lamports,
-                                data: data.clone(),
-                                owner: account.owner.clone().try_into().unwrap(),
-                                executable: account.executable,
-                                rent_epoch: account.rent_epoch,
-                            };
-                            if let Ok(updated_clock) = account_data.deserialize_data::<Clock>() {
-                                clock = updated_clock;
-                                debug!("Clock updated: {:?}", clock);
-                            }
-                            continue;
-                        }
-
-                        if all_obligations_pubkeys.contains(&pubkey) {
-                            let mut data_slice: &[u8] = &data;
-                            let obligation = match Obligation::try_deserialize(&mut data_slice) {
-                                Ok(obligation) => obligation,
-                                Err(e) => {
-                                    error!("Failed to deserialize obligation: {:?}, pubkey: {:?}", e, pubkey);
-                                    continue;
-                                }
-                            };
-                            let mut obligation_map_write = obligation_map.write().unwrap();
-                            obligation_map_write.insert(pubkey, obligation);
-                            info!("Obligation updated: {:?}, obligation: {:?}", pubkey, obligation);
-
-                            if let Err(e) = liquidation_engine.preload_swap_instructions(klend_client, &pubkey, &obligation, &all_reserves).await {
-                                error!("Failed to preload swap instructions for obligation {}: {}", pubkey, e);
-                            }
-                            continue;
-                        }
-
-                        if data.len() < 8 {
-                            debug!("Account: {:?} is not scope price account", pubkey);
-                            continue;
-                        }
-
-                        let disc_bytes = &data[0..8];
-                        if disc_bytes != ScopePrices::discriminator() {
-                            debug!("Account: {:?} is not scope price account", pubkey);
-                            continue;
-                        }
-
-                        let scope_prices = bytemuck::from_bytes::<ScopePrices>(&data[8..]);
-                        //info!("Account: {:?}, scope_prices updated: {:?}", pubkey, scope_prices.prices.len());
-
-                        //for price in scope_prices.prices {
-                        //    let price_age_in_seconds = clock.unix_timestamp.saturating_sub(price.unix_timestamp as i64);
-                        //    info!("Price age: {:?} second, price: value={}, exp={}", price_age_in_seconds, price.price.value, price.price.exp);
-                        //}
-
-                        let mut price_changed_reserves: HashSet<Pubkey> = HashSet::new();
-
-                        for (reserve_pubkey, reserve) in all_reserves.iter() {
-                            if reserve.config.token_info.scope_configuration.price_feed == pubkey {
-                                if let Some(price) = get_price_usd(&scope_prices, reserve.config.token_info.scope_configuration.price_chain) {
-                                    //let price_age_in_seconds = clock.unix_timestamp.saturating_sub(price.timestamp as i64);
-                                    //info!("WebSocket update - reserve: {} price: {:?} age: {:?} seconds", reserve.config.token_info.symbol(), price, price_age_in_seconds);
-                                    if let Some(old_price) = reserves_prices.get(reserve_pubkey) {
-                                        if old_price.price_value != price.price_value {
-                                            price_changed_reserves.insert(*reserve_pubkey);
-                                            reserves_prices.insert(*reserve_pubkey, price.clone());
-                                            info!("Price changed for reserve: {} new price: {:?}", reserve.config.token_info.symbol(), price);
-                                        }
-                                    } else {
-                                        price_changed_reserves.insert(*reserve_pubkey);
-                                        reserves_prices.insert(*reserve_pubkey, price.clone());
-                                        info!("Price changed for reserve: {} new price: {:?}", reserve.config.token_info.symbol(), price);
-                                    }
-                                }
-                            }
-                        }
-
-                        if price_changed_reserves.is_empty() {
-                            info!("No price changed for reserves, skip");
-                            continue;
-                        }
-
-                        for market_pubkey in market_pubkeys {
-                            let start = std::time::Instant::now();
-
-                            // Now call refresh_market without additional updated_account_data since we've already updated the arrays
-                            let _ = refresh_market(klend_client,
-                                &market_pubkey,
-                                &Vec::new(),
-                                all_reserves,
-                                all_lending_market.get_mut(market_pubkey).unwrap(),
-                                &clock,
-                                Some(all_scope_price_accounts),
-                                Some(all_switchboard_accounts),
-                                Some(&HashMap::from([(pubkey, data.clone())]))
-                                ).await;
-
-                            //scan obligations
-                            let obligations = market_obligations_map.get_mut(market_pubkey);
-
-                            let obligations = match obligations {
-                                Some(obligations) => obligations,
-                                None => {
-                                    info!("No obligations found for market: {:?}", market_pubkey);
-                                    continue;
-                                }
-                            };
-
-                            let _obligation_map_write = obligation_map.write().unwrap();
-                            let checked_obligation_count = liquidation_engine.scan_obligations(klend_client,
-                                &clock,
-                                obligations,
-                                all_reserves,
-                                all_lending_market.get(market_pubkey).unwrap(),
-                                all_rts.get(market_pubkey).unwrap(),
-                                Some(&price_changed_reserves)
-                            ).await;
-
-                            let duration = start.elapsed();
-                            info!("Scan {} obligations, time used: {:?} s, checked {} obligations", obligations.len(), duration, checked_obligation_count);
-                        }
-
-                        //refresh market obligation map
-                        match load_obligations_map(scope.clone()).await {
-                            Ok(updated_obligations_map) => {
-                                //find all obligations pubkeys in updated_obligations_map that are not in market_obligations_map
-                                let updated_obligations_pubkeys = updated_obligations_map.values().flatten().cloned().collect::<Vec<Pubkey>>();
-                                let obligations_map_pubkeys = market_obligations_map.values().flatten().cloned().collect::<Vec<Pubkey>>();
-                                let mut obligations_to_refresh = Vec::new();
-                                for pubkey in updated_obligations_pubkeys {
-                                    if !obligations_map_pubkeys.contains(&pubkey) {
-                                        obligations_to_refresh.push(pubkey);
-                                    }
-                                }
-
-                                if obligations_to_refresh.is_empty() {
-                                    info!("No new obligations to refresh");
-                                    continue;
-                                }
-
-                                pubkeys.extend(obligations_to_refresh.clone());
-
-                                let mut accounts = HashMap::new();
-                                let account_filter = pubkeys.iter().map(|key| key.to_string()).collect::<Vec<String>>();
-                                accounts.insert(
-                                    "client".to_string(),
-                                    SubscribeRequestFilterAccounts {
-                                        account: account_filter,
-                                        owner: vec![],
-                                        filters: vec![],
-                                    },
-                                );
-                                //send subscribe request to refresh obligations
-                                subscribe_tx.send(
-                                    SubscribeRequest {
-                                        slots: HashMap::new(),
-                                        accounts,
-                                        transactions: transactions.clone(),
-                                        blocks: HashMap::new(),
-                                        blocks_meta: HashMap::new(),
-                                        commitment: Some(CommitmentLevel::Processed.into()),
-                                        accounts_data_slice: vec![],
-                                        transactions_status: HashMap::new(),
-                                        ping: None,
-                                        entry: HashMap::new(),
-                                    }
-                                ).await.map_err(|e| {
-                                    anyhow::Error::msg(format!(
-                                        "Failed to subscribe: {} ({})",
-                                        endpoint, e
-                                    ))
-                                })?;
-                                all_obligations_pubkeys.extend(obligations_to_refresh);
-                                market_obligations_map.clear();
-                                market_obligations_map.extend(updated_obligations_map);
-                                info!("Successfully loaded {} markets from obligations map", market_obligations_map.len());
-                            }
-                            Err(e) => {
-                                error!("Failed to load obligations map: {:?}", e);
-                            }
-                        }
-                    }
-                }
-                Some(UpdateOneof::Transaction(transaction)) => {
-                    let transaction = transaction.transaction;
-                    match transaction {
-                        Some(transaction) => {
-                            //covert signature vec to base58 string
-                            let signature = bs58::encode(transaction.signature.as_slice()).into_string();
-                            info!("Transaction of competitor, signature: {:?}", signature);
-                        }
-                        None => {
-                            continue;
-                        }
-                    }
-                }
-                _ => {
-                    debug!("Unknown update oneof: {:?}", msg.update_oneof);
-                }
-            }
-        } else {
-            info!("Account Update error: {:?}", message);
-            break;
-        }
-    }
-
-    Ok(())
-}

@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, HashSet}, sync::Arc, time::Duration};
+use std::{collections::{HashMap, HashSet}, sync::{Arc, RwLock}, time::Duration};
 
 use anyhow::Result;
 use colored::Colorize;
@@ -12,13 +12,22 @@ use solana_sdk::{
     address_lookup_table::AddressLookupTableAccount,
     pubkey::Pubkey,
     signer::Signer,
+    bs58,
 };
 use tokio::time::sleep;
 use tracing::{info, warn, debug, error};
 use extra_proto::{Replace, SimulateTransactionRequest};
+use futures::SinkExt;
+use futures_util::stream::StreamExt;
+use scope::OraclePrices as ScopePrices;
+use anchor_lang::{AccountDeserialize, Discriminator};
+use yellowstone_grpc_proto::prelude::{SubscribeRequest, SubscribeRequestFilterAccounts, SubscribeRequestFilterTransactions, subscribe_update::UpdateOneof};
+use yellowstone_grpc_proto::geyser::CommitmentLevel;
+
+use bytemuck;
 
 use crate::{
-    accounts::{dump_accounts_to_file, refresh_oracle_keys, load_obligations_map, MarketAccounts, oracle_accounts, OracleAccounts, account_update_ws},
+    accounts::{dump_accounts_to_file, refresh_oracle_keys, load_obligations_map, MarketAccounts, oracle_accounts, OracleAccounts, load_competitors_from_file, TimestampedPrice, get_price_usd},
     client::KlendClient,
     model::StateWithKey,
     operations::{
@@ -29,6 +38,7 @@ use crate::{
     sysvars,
     swap,
     instruction_parser,
+    yellowstone_transaction::create_yellowstone_client,
 };
 
 pub struct LiquidationEngine {
@@ -40,6 +50,28 @@ pub struct LiquidationEngine {
     pub obligation_swap_map: HashMap<Pubkey, (Vec<Instruction>, Option<Vec<AddressLookupTableAccount>>)>,
     /// List of obligation reserves that need refreshing
     pub obligation_reservers_to_refresh: Vec<Pubkey>,
+    /// Cache for market obligations mapping
+    pub market_obligations_map: HashMap<Pubkey, Vec<Pubkey>>,
+    /// Cache for market pubkeys
+    pub market_pubkeys: Vec<Pubkey>,
+    /// Cache for scope price accounts
+    pub all_scope_price_accounts: Vec<(Pubkey, bool, Account)>,
+    /// Cache for switchboard accounts
+    pub all_switchboard_accounts: Vec<(Pubkey, bool, Account)>,
+    /// Cache for all reserves
+    pub all_reserves: HashMap<Pubkey, Reserve>,
+    /// Cache for all lending markets
+    pub all_lending_market: HashMap<Pubkey, LendingMarket>,
+    /// Cache for all referrer token states
+    pub all_rts: HashMap<Pubkey, HashMap<Pubkey, ReferrerTokenState>>,
+    /// Cache for reserve prices with timestamps
+    pub reserves_prices: HashMap<Pubkey, TimestampedPrice>,
+    /// Cache for current clock
+    pub clock: Option<Clock>,
+    /// Cache for subscribing pubkeys
+    pub subscribing_pubkeys: Vec<Pubkey>,
+    /// Cache for obligations with thread-safe access
+    pub shared_obligation_map: Arc<RwLock<HashMap<Pubkey, Obligation>>>,
 }
 
 impl LiquidationEngine {
@@ -49,6 +81,17 @@ impl LiquidationEngine {
             market_accounts_map: HashMap::new(),
             obligation_swap_map: HashMap::new(),
             obligation_reservers_to_refresh: Vec::new(),
+            market_obligations_map: HashMap::new(),
+            market_pubkeys: Vec::new(),
+            all_scope_price_accounts: Vec::new(),
+            all_switchboard_accounts: Vec::new(),
+            all_reserves: HashMap::new(),
+            all_lending_market: HashMap::new(),
+            all_rts: HashMap::new(),
+            reserves_prices: HashMap::new(),
+            clock: None,
+            subscribing_pubkeys: Vec::new(),
+            shared_obligation_map: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -524,7 +567,6 @@ impl LiquidationEngine {
         address: &Pubkey,
         obligation: &mut Obligation,
         lending_market: &LendingMarket,
-        clock: &Clock,
         reserves: &HashMap<Pubkey, Reserve>,
         rts: &HashMap<Pubkey, ReferrerTokenState>
     ) -> Result<()> {
@@ -568,7 +610,7 @@ impl LiquidationEngine {
             &address,
             obligation,
             &lending_market,
-            clock.slot,
+            self.clock.as_ref().unwrap().slot,
             kamino_lending::MaxReservesAsCollateralCheck::Skip,
             deposit_reserves.into_iter(),
             borrow_reserves.into_iter(),
@@ -583,49 +625,40 @@ impl LiquidationEngine {
 
         let obligation_stats = math::obligation_info(address, &obligation);
         if obligation_stats.ltv > obligation_stats.unhealthy_ltv {
-            info!("[Liquidation Thread] Liquidating obligation start: pubkey: {}, obligation: {}, slot: {}", address.to_string().green(), obligation.to_string().green(), clock.slot);
+            info!("[Liquidation Thread] Liquidating obligation start: pubkey: {}, obligation: {}, slot: {}", address.to_string().green(), obligation.to_string().green(), self.clock.as_ref().unwrap().slot);
 
             //dump accounts
             let mut extra_client = klend_client.extra_client.clone();
-            let reserves_for_spawn = reserves.clone();
-            let obligation_lending_market = obligation.lending_market;
-            let obligation_reserve_keys = obligation_reserve_keys.clone();
-            let address = address.clone();
-            let obligation = obligation.clone();
-            let slot = clock.slot;
+            let mut all_oracle_keys = HashSet::new();
+            let mut pyth_keys = HashSet::new();
+            let mut switchboard_keys = HashSet::new();
+            let mut scope_keys = HashSet::new();
 
-            tokio::spawn(async move {
-                let mut all_oracle_keys = HashSet::new();
-                let mut pyth_keys = HashSet::new();
-                let mut switchboard_keys = HashSet::new();
-                let mut scope_keys = HashSet::new();
+            refresh_oracle_keys(&reserves, &mut all_oracle_keys, &mut pyth_keys, &mut switchboard_keys, &mut scope_keys);
 
-                refresh_oracle_keys(&reserves_for_spawn, &mut all_oracle_keys, &mut pyth_keys, &mut switchboard_keys, &mut scope_keys);
+            let mut to_dump_keys = Vec::new();
+            to_dump_keys.extend(all_oracle_keys);
+            to_dump_keys.push(Clock::id());
+            to_dump_keys.push(*address);
+            to_dump_keys.push(obligation.lending_market);
+            to_dump_keys.extend(obligation_reserve_keys.clone());
 
-                let mut to_dump_keys = Vec::new();
-                to_dump_keys.extend(all_oracle_keys);
-                to_dump_keys.push(Clock::id());
-                to_dump_keys.push(address);
-                to_dump_keys.push(obligation_lending_market);
-                to_dump_keys.extend(obligation_reserve_keys.clone());
-
-                if let Err(e) = dump_accounts_to_file(
-                    &mut extra_client,
-                    &to_dump_keys,
-                    slot,
-                    &obligation_reserve_keys,
-                    address,
-                    obligation
-                ).await {
-                    error!("Error dumping accounts to file: {}", e);
-                }
-            });
+            if let Err(e) = dump_accounts_to_file(
+                &mut extra_client,
+                &to_dump_keys,
+                self.clock.as_ref().unwrap().slot,
+                &obligation_reserve_keys,
+                *address,
+                obligation.clone()
+            ).await {
+                error!("Error dumping accounts to file: {}", e);
+            }
 
             let liquidate_start = std::time::Instant::now();
             match self.liquidate_with_loaded_data(
                 klend_client,
                 &address,
-                clock.clone(),
+                self.clock.as_ref().unwrap().clone(),
                 obligation.clone(),
                 reserves.clone(),
                 *lending_market,
@@ -662,13 +695,14 @@ impl LiquidationEngine {
 
         let mut total_liquidatable_obligations = 0;
 
-        let clock = match sysvars::get_clock(&klend_client.local_client.client).await {
+        // Initialize or update clock
+        self.clock = Some(match sysvars::get_clock(&klend_client.local_client.client).await {
             Ok(clock) => clock,
             Err(e) => {
                 error!("Error getting clock: {}", e);
                 return Err(e.into());
             }
-        };
+        });
 
         let en_clock = start.elapsed().as_secs_f64();
         debug!("Refreshing market clock time used: {}s", en_clock);
@@ -700,7 +734,7 @@ impl LiquidationEngine {
                     &obligation_reservers_to_refresh,
                     reserves,
                     lending_market,
-                    &clock,
+                    self.clock.as_ref().unwrap(),
                     None,
                     None,
                     None).await {
@@ -719,7 +753,7 @@ impl LiquidationEngine {
                 let reserves = reserves.clone();
                 let lending_market = lending_market.clone();
                 let rts = rts.clone();
-                self.scan_obligations(klend_client, &clock, liquidatable_obligations, &reserves, &lending_market, &rts, None).await;
+                self.scan_obligations(klend_client, liquidatable_obligations, &reserves, &lending_market, &rts, None).await;
             }
         }
         let en = start.elapsed().as_secs_f64();
@@ -783,7 +817,6 @@ impl LiquidationEngine {
     pub async fn scan_obligations(
         &mut self,
         klend_client: &Arc<KlendClient>,
-        clock: &Clock,
         liquidatable_obligations: &mut Vec<Pubkey>,
         reserves: &HashMap<Pubkey, Reserve>,
         lending_market: &LendingMarket,
@@ -817,7 +850,7 @@ impl LiquidationEngine {
             }
 
             if let Some(mut obligation) = self.obligation_map.remove(&address) {
-                if let Err(e) = self.check_and_liquidate(klend_client, &address, &mut obligation, &lending_market, clock, &reserves, &rts).await {
+                if let Err(e) = self.check_and_liquidate(klend_client, &address, &mut obligation, &lending_market, &reserves, &rts).await {
                     error!("[Liquidation Thread] Error checking/liquidating obligation {}: {}", address, e);
                 }
                 self.obligation_map.insert(*address, obligation);
@@ -831,7 +864,7 @@ impl LiquidationEngine {
                             error!("[Liquidation Thread] Error preloading swap instructions for obligation {}: {}", address, e);
                         }
 
-                        if let Err(e) = self.check_and_liquidate(klend_client, &address, &mut obligation, &lending_market, clock, &reserves, &rts).await {
+                        if let Err(e) = self.check_and_liquidate(klend_client, &address, &mut obligation, &lending_market, &reserves, &rts).await {
                             error!("[Liquidation Thread] Error checking/liquidating obligation {}: {}", address, e);
                         }
                         self.obligation_map.insert(*address, obligation);
@@ -913,19 +946,12 @@ impl LiquidationEngine {
     }
 
     pub async fn stream_liquidate(&mut self, klend_client: &Arc<KlendClient>, scope: String) -> Result<()> {
-        let market_obligations_map = match load_obligations_map(scope.clone()).await {
+        self.market_obligations_map = match load_obligations_map(scope.clone()).await {
             Ok(value) => value,
             Err(value) => return value,
         };
 
-        let mut market_pubkeys = Vec::new();
-        let mut all_scope_price_accounts: Vec<(Pubkey, bool, Account)> = Vec::new();
-        let mut all_switchboard_accounts: Vec<(Pubkey, bool, Account)> = Vec::new();
-        let mut all_reserves: HashMap<Pubkey, Reserve> = HashMap::new();
-        let mut all_lending_market: HashMap<Pubkey, LendingMarket> = HashMap::new();
-        let mut all_rts: HashMap<Pubkey, HashMap<Pubkey, ReferrerTokenState>> = HashMap::new();
-
-        for market_pubkey in market_obligations_map.keys() {
+        for market_pubkey in self.market_obligations_map.keys() {
             let (market_accounts, rts) = match self.load_market_accounts_and_rts(klend_client, &market_pubkey).await {
                 Ok(result) => result,
                 Err(e) => {
@@ -946,41 +972,33 @@ impl LiquidationEngine {
                 }
             };
 
-            market_pubkeys.push(*market_pubkey);
+            self.market_pubkeys.push(*market_pubkey);
             // Deduplicate scope price accounts by pubkey
             for account in scope_price_accounts {
-                if !all_scope_price_accounts.iter().any(|(key, _, _)| *key == account.0) {
-                    all_scope_price_accounts.push(account);
+                if !self.all_scope_price_accounts.iter().any(|(key, _, _)| *key == account.0) {
+                    self.all_scope_price_accounts.push(account);
                 }
             }
 
             // Deduplicate switchboard accounts by pubkey
             for account in switchboard_accounts {
-                if !all_switchboard_accounts.iter().any(|(key, _, _)| *key == account.0) {
-                    all_switchboard_accounts.push(account);
+                if !self.all_switchboard_accounts.iter().any(|(key, _, _)| *key == account.0) {
+                    self.all_switchboard_accounts.push(account);
                 }
             }
 
             // Insert individual reserves instead of nested structure
-            all_reserves.extend(market_accounts.reserves);
+            self.all_reserves.extend(market_accounts.reserves);
 
-            all_lending_market.insert(*market_pubkey, market_accounts.lending_market);
-            all_rts.insert(*market_pubkey, rts);
+            self.all_lending_market.insert(*market_pubkey, market_accounts.lending_market);
+            self.all_rts.insert(*market_pubkey, rts);
         }
 
-        println!("all_reserves: {:?}", all_reserves.keys());
+        println!("all_reserves: {:?}", self.all_reserves.keys());
 
-        let mut market_obligations_map = market_obligations_map;
-        let _ = account_update_ws(
+        let _ = self.account_update_ws(
             klend_client,
-            scope,
-            &market_pubkeys,
-            &mut market_obligations_map,
-            &mut all_scope_price_accounts,
-            &mut all_switchboard_accounts,
-            &mut all_reserves,
-            &mut all_lending_market,
-            &mut all_rts
+            scope
         ).await;
 
         Ok(())
@@ -995,15 +1013,409 @@ impl LiquidationEngine {
         Ok((market_accs, rts))
     }
 
-    async fn refresh_market(&self, klend_client: &Arc<KlendClient>, market: &Pubkey, obligation_reservers_to_refresh: &Vec<Pubkey>,
-        reserves: &mut HashMap<Pubkey, Reserve>, lending_market: &mut LendingMarket, clock: &Clock,
-        scope_price_accounts: Option<&mut Vec<(Pubkey, bool, Account)>>,
-        switchboard_accounts: Option<&mut Vec<(Pubkey, bool, Account)>>,
-        updated_account_data: Option<&HashMap<Pubkey, Vec<u8>>>)
-    -> Result<()> {
-        // This method is a simplified version that delegates to the main refresh_market function
-        // We import and call the function from main.rs
-        crate::refresh_market(klend_client, market, obligation_reservers_to_refresh, reserves, lending_market, clock, scope_price_accounts, switchboard_accounts, updated_account_data).await
+
+
+    pub async fn account_update_ws(
+        &mut self,
+        klend_client: &Arc<KlendClient>,
+        scope: String,
+    ) -> anyhow::Result<()> {
+        self.collect_subscription_keys().await?;
+
+        let competitors = load_competitors_from_file()?;
+        info!("competitors: {:?}", competitors);
+
+        let mut accounts = HashMap::new();
+        let account_filter = self.subscribing_pubkeys.iter().map(|key| key.to_string()).collect::<Vec<String>>();
+        accounts.insert(
+            "client".to_string(),
+            SubscribeRequestFilterAccounts {
+                account: account_filter,
+                owner: vec![],
+                filters: vec![],
+            },
+        );
+
+        let transactions_filter = competitors.iter().map(|key| key.to_string()).collect::<Vec<String>>();
+        let mut transactions = HashMap::new();
+        transactions.insert(
+            "transactions".to_string(),
+            SubscribeRequestFilterTransactions {
+                account_required: transactions_filter,
+                vote: Some(false),
+                failed: Some(false),
+                ..Default::default()
+            },
+        );
+
+        let endpoint = "ws://198.244.253.218:10000".to_string();
+        let x_token = None;
+
+        let mut client = create_yellowstone_client(&endpoint, &x_token, 10).await?;
+        let (mut subscribe_tx, mut stream) = client.subscribe().await.map_err(|e| {
+            anyhow::Error::msg(format!(
+                "Failed to subscribe: {} ({})",
+                endpoint, e
+            ))
+        })?;
+        info!("Connected to the gRPC server");
+
+        subscribe_tx
+            .send(SubscribeRequest {
+                slots: HashMap::new(),
+                accounts,
+                transactions: transactions.clone(),
+                blocks: HashMap::new(),
+                blocks_meta: HashMap::new(),
+                commitment: Some(CommitmentLevel::Processed.into()),
+                accounts_data_slice: vec![],
+                transactions_status: HashMap::new(),
+                ping: None,
+                entry: HashMap::new(),
+            })
+            .await
+            .map_err(|e| {
+                anyhow::Error::msg(format!(
+                    "Failed to send: {} ({})",
+                    endpoint, e
+                ))
+            })?;
+
+        // Initialize clock if not already set
+        if self.clock.is_none() {
+            self.clock = Some(match sysvars::clock(&klend_client.local_client.client).await {
+                Ok(clock) => clock,
+                Err(_e) => {
+                    error!("Failed to get clock");
+                    return Err(anyhow::Error::msg("Failed to get clock"));
+                }
+            });
+        }
+
+        while let Some(message) = stream.next().await {
+            if let Ok(msg) = message {
+                match msg.update_oneof {
+                    Some(UpdateOneof::Account(account)) => {
+                        if let Some(account) = account.account {
+                            let pubkey = Pubkey::try_from(account.pubkey.as_slice()).unwrap();
+                            let data = account.data;
+
+                            if self.handle_clock_update(&pubkey, &data).await? {
+                                continue;
+                            }
+
+                            if self.handle_obligation_update(
+                                &pubkey,
+                                &data,
+                                klend_client,
+                            ).await? {
+                                continue;
+                            }
+
+                            if let Some(price_changed_reserves) = self.handle_price_update(
+                                &pubkey,
+                                &data,
+                            ).await? {
+                                self.process_price_changes(
+                                    klend_client,
+                                    &price_changed_reserves,
+                                    &pubkey,
+                                    &data,
+                                ).await?;
+
+                                // Refresh obligations map and update subscription if needed
+                                self.refresh_obligations_subscription(
+                                    &scope,
+                                    &mut subscribe_tx,
+                                ).await?;
+                            }
+                        }
+                    }
+                    Some(UpdateOneof::Transaction(transaction)) => {
+                        self.handle_transaction_update(transaction).await?;
+                    }
+                    _ => {
+                        debug!("Unknown update oneof: {:?}", msg.update_oneof);
+                    }
+                }
+            } else {
+                info!("Account Update error: {:?}", message);
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn collect_subscription_keys(
+        &mut self,
+    ) -> anyhow::Result<()> {
+        let scope_price_pubkeys = self.all_scope_price_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
+        let switchboard_pubkeys = self.all_switchboard_accounts.iter().map(|(key, _, _)| *key).collect::<Vec<Pubkey>>();
+        let all_obligations_pubkeys = self.market_obligations_map.values().flatten().copied().collect::<Vec<Pubkey>>();
+        self.subscribing_pubkeys = HashSet::<Pubkey>::from_iter([scope_price_pubkeys.clone(), switchboard_pubkeys, all_obligations_pubkeys.clone()].concat()).into_iter().collect();
+        self.subscribing_pubkeys.push(Clock::id());
+        info!("account update ws: {:?}", self.subscribing_pubkeys);
+
+        Ok(())
+    }
+
+
+
+    async fn handle_clock_update(
+        &mut self,
+        pubkey: &Pubkey,
+        data: &Vec<u8>,
+    ) -> anyhow::Result<bool> {
+        if *pubkey == Clock::id() {
+            let account_data = Account {
+                lamports: 0, // We don't have lamports from the update
+                data: data.clone(),
+                owner: Clock::id(), // Clock is owned by the system program
+                executable: false,
+                rent_epoch: 0,
+            };
+            if let Ok(updated_clock) = account_data.deserialize_data::<Clock>() {
+                self.clock = Some(updated_clock);
+                debug!("Clock updated: {:?}", self.clock);
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn handle_obligation_update(
+        &mut self,
+        pubkey: &Pubkey,
+        data: &Vec<u8>,
+        klend_client: &Arc<KlendClient>,
+    ) -> anyhow::Result<bool> {
+        let all_obligations_pubkeys: Vec<Pubkey> = self.market_obligations_map.values().flatten().copied().collect();
+
+        if all_obligations_pubkeys.contains(pubkey) {
+            let mut data_slice: &[u8] = data;
+            let obligation = match Obligation::try_deserialize(&mut data_slice) {
+                Ok(obligation) => obligation,
+                Err(e) => {
+                    error!("Failed to deserialize obligation: {:?}, pubkey: {:?}", e, pubkey);
+                    return Ok(true);
+                }
+            };
+            let mut obligation_map_write = self.shared_obligation_map.write().unwrap();
+            obligation_map_write.insert(*pubkey, obligation.clone());
+            drop(obligation_map_write); // Release the lock early
+            info!("Obligation updated: {:?}, obligation: {:?}", pubkey, obligation);
+
+            // Clone the reserves to avoid borrowing conflict
+            let all_reserves_clone = self.all_reserves.clone();
+            if let Err(e) = self.preload_swap_instructions(klend_client, pubkey, &obligation, &all_reserves_clone).await {
+                error!("Failed to preload swap instructions for obligation {}: {}", pubkey, e);
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn handle_price_update(
+        &mut self,
+        pubkey: &Pubkey,
+        data: &Vec<u8>,
+    ) -> anyhow::Result<Option<HashSet<Pubkey>>> {
+        if data.len() < 8 {
+            debug!("Account: {:?} is not scope price account", pubkey);
+            return Ok(None);
+        }
+
+        let disc_bytes = &data[0..8];
+        if disc_bytes != ScopePrices::discriminator() {
+            debug!("Account: {:?} is not scope price account", pubkey);
+            return Ok(None);
+        }
+
+        let scope_prices = bytemuck::from_bytes::<ScopePrices>(&data[8..]);
+        let mut price_changed_reserves: HashSet<Pubkey> = HashSet::new();
+
+        for (reserve_pubkey, reserve) in self.all_reserves.iter() {
+            if reserve.config.token_info.scope_configuration.price_feed == *pubkey {
+                                    if let Some(price) = get_price_usd(&scope_prices, reserve.config.token_info.scope_configuration.price_chain) {
+                        if let Some(old_price) = self.reserves_prices.get(reserve_pubkey) {
+                            if old_price.price_value != price.price_value {
+                                price_changed_reserves.insert(*reserve_pubkey);
+                                self.reserves_prices.insert(*reserve_pubkey, price.clone());
+                                info!("Price changed for reserve: {} new price: {:?}", reserve.config.token_info.symbol(), price);
+                            }
+                        } else {
+                            price_changed_reserves.insert(*reserve_pubkey);
+                            self.reserves_prices.insert(*reserve_pubkey, price.clone());
+                            info!("Price changed for reserve: {} new price: {:?}", reserve.config.token_info.symbol(), price);
+                        }
+                    }
+            }
+        }
+
+        if price_changed_reserves.is_empty() {
+            info!("No price changed for reserves, skip");
+            return Ok(None);
+        }
+
+        Ok(Some(price_changed_reserves))
+    }
+
+    async fn process_price_changes(
+        &mut self,
+        klend_client: &Arc<KlendClient>,
+        price_changed_reserves: &HashSet<Pubkey>,
+        updated_account_pubkey: &Pubkey,
+        updated_account_data: &Vec<u8>,
+    ) -> anyhow::Result<()> {
+        // Clone market_pubkeys to avoid borrowing conflicts
+        let market_pubkeys = self.market_pubkeys.clone();
+
+        for market_pubkey in &market_pubkeys {
+            let start = std::time::Instant::now();
+
+            // Refresh market first - clone clock to avoid borrow conflicts
+            let clock = self.clock.as_ref().unwrap().clone();
+            let _ = crate::refresh_market(klend_client,
+                market_pubkey,
+                &Vec::new(),
+                &mut self.all_reserves,
+                self.all_lending_market.get_mut(market_pubkey).unwrap(),
+                &clock,
+                Some(&mut self.all_scope_price_accounts),
+                Some(&mut self.all_switchboard_accounts),
+                Some(&HashMap::from([(*updated_account_pubkey, updated_account_data.clone())]))
+            ).await;
+
+            // Now scan obligations - completely separate the borrows
+            let obligations_len = match self.market_obligations_map.get(market_pubkey) {
+                Some(obligations) => obligations.len(),
+                None => {
+                    info!("No obligations found for market: {:?}", market_pubkey);
+                    continue;
+                }
+            };
+
+            // Clone all necessary data to avoid borrow conflicts
+            let reserves_clone = self.all_reserves.clone();
+            let lending_market = self.all_lending_market.get(market_pubkey).cloned().unwrap();
+            let rts = self.all_rts.get(market_pubkey).cloned().unwrap();
+
+            // Scan obligations - need to extract obligations first to avoid borrow conflicts
+            let checked_obligation_count = if let Some(obligations) = self.market_obligations_map.remove(market_pubkey) {
+                // Put the obligations back after scanning
+                let mut mutable_obligations = obligations;
+                let count = self.scan_obligations(klend_client,
+                    &mut mutable_obligations,
+                    &reserves_clone,
+                    &lending_market,
+                    &rts,
+                    Some(price_changed_reserves)
+                ).await;
+
+                // Put the obligations back
+                self.market_obligations_map.insert(*market_pubkey, mutable_obligations);
+                count
+            } else {
+                0
+            };
+
+            let duration = start.elapsed();
+            info!("Scan {} obligations, time used: {:?} s, checked {} obligations", obligations_len, duration, checked_obligation_count);
+        }
+
+        Ok(())
+    }
+
+
+
+    async fn handle_transaction_update(
+        &self,
+        transaction: yellowstone_grpc_proto::prelude::SubscribeUpdateTransaction,
+    ) -> anyhow::Result<()> {
+        if let Some(transaction) = transaction.transaction {
+            let signature = bs58::encode(transaction.signature.as_slice()).into_string();
+            info!("Transaction of competitor, signature: {:?}", signature);
+        }
+        Ok(())
+    }
+
+        async fn refresh_obligations_subscription<T>(
+        &mut self,
+        scope: &str,
+        subscribe_tx: &mut T,
+    ) -> anyhow::Result<()>
+    where
+        T: futures::SinkExt<SubscribeRequest> + Unpin,
+        T::Error: std::fmt::Debug + std::fmt::Display,
+    {
+        match load_obligations_map(scope.to_string()).await {
+            Ok(updated_obligations_map) => {
+                let updated_obligations_pubkeys = updated_obligations_map.values().flatten().cloned().collect::<Vec<Pubkey>>();
+                let obligations_map_pubkeys = self.market_obligations_map.values().flatten().cloned().collect::<Vec<Pubkey>>();
+                let mut obligations_to_refresh = Vec::new();
+                for pubkey in updated_obligations_pubkeys {
+                    if !obligations_map_pubkeys.contains(&pubkey) {
+                        obligations_to_refresh.push(pubkey);
+                    }
+                }
+
+                if !obligations_to_refresh.is_empty() {
+                    self.subscribing_pubkeys.extend(obligations_to_refresh.clone());
+
+                    let mut accounts = HashMap::new();
+                    let account_filter = self.subscribing_pubkeys.iter().map(|key| key.to_string()).collect::<Vec<String>>();
+                    accounts.insert(
+                        "client".to_string(),
+                        SubscribeRequestFilterAccounts {
+                            account: account_filter,
+                            owner: vec![],
+                            filters: vec![],
+                        },
+                    );
+
+                    let competitors = load_competitors_from_file()?;
+                    let transactions_filter = competitors.iter().map(|key| key.to_string()).collect::<Vec<String>>();
+                    let mut transactions = HashMap::new();
+                    transactions.insert(
+                        "transactions".to_string(),
+                        SubscribeRequestFilterTransactions {
+                            account_required: transactions_filter,
+                            vote: Some(false),
+                            failed: Some(false),
+                            ..Default::default()
+                        },
+                    );
+
+                    if let Err(e) = subscribe_tx.send(
+                        SubscribeRequest {
+                            slots: HashMap::new(),
+                            accounts,
+                            transactions,
+                            blocks: HashMap::new(),
+                            blocks_meta: HashMap::new(),
+                            commitment: Some(CommitmentLevel::Processed.into()),
+                            accounts_data_slice: vec![],
+                            transactions_status: HashMap::new(),
+                            ping: None,
+                            entry: HashMap::new(),
+                        }
+                    ).await {
+                        error!("Failed to subscribe: {}", e);
+                    } else {
+                        self.market_obligations_map.clear();
+                        self.market_obligations_map.extend(updated_obligations_map);
+                        info!("Successfully loaded {} markets from obligations map", self.market_obligations_map.len());
+                    }
+                } else {
+                    info!("No new obligations to refresh");
+                }
+            }
+            Err(e) => {
+                error!("Failed to load obligations map: {:?}", e);
+            }
+        }
+        Ok(())
     }
 }
 
