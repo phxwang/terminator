@@ -108,13 +108,17 @@ impl LiquidationEngine {
 
         info!("Performing full data refresh");
 
-        let (obligation_data, clock, reserves, market, rts, loaded_accounts_data) = match slot {
+        let (obligation_data, market, loaded_accounts_data) = match slot {
             Some(slot) => {
                 // load data from extra
-                klend_client.load_data_from_file(obligation, slot).await?
+                let (obligation_data, clock, reserves, market, rts, loaded_accounts_data) =klend_client.load_data_from_file(obligation, slot).await?;
+                self.clock = Some(clock);
+                self.all_reserves = reserves;
+                self.all_rts.insert(obligation_data.lending_market, rts);
+                (obligation_data, market, loaded_accounts_data)
             },
             None => {
-                let clock = sysvars::clock(&klend_client.local_client.client).await?;
+                self.clock = Some(sysvars::clock(&klend_client.local_client.client).await?);
 
                 // Reload accounts
                 let ob = klend_client.fetch_obligation(obligation).await?;
@@ -126,18 +130,18 @@ impl LiquidationEngine {
                     .fetch_market_and_reserves(&ob.lending_market)
                     .await?;
 
-                let reserves = market_accs.reserves;
+                self.all_reserves = market_accs.reserves;
                 let market = market_accs.lending_market;
                 // todo - don't load all
-                let rts = klend_client.fetch_referrer_token_states().await?;
+                self.all_rts.insert(ob.lending_market, klend_client.fetch_referrer_token_states().await?);
 
-                Self::dump_liquidation_accounts_static(klend_client, obligation, &ob, &reserves, &clock).await?;
+                Self::dump_liquidation_accounts_static(klend_client, obligation, &ob, &self.all_reserves, self.clock.as_ref().unwrap()).await?;
 
-                (ob, clock, reserves, market, rts, None)
+                (ob, market, None)
             }
         };
 
-        self.liquidate_with_loaded_data(klend_client, obligation, clock, obligation_data, reserves, market, rts, loaded_accounts_data).await?;
+        self.liquidate_with_loaded_data(klend_client, obligation, obligation_data, market, loaded_accounts_data).await?;
 
         Ok(())
     }
@@ -146,21 +150,18 @@ impl LiquidationEngine {
         &mut self,
         klend_client: &Arc<KlendClient>,
         obligation: &Pubkey,
-        clock: Clock,
         ob: Obligation,
-        reserves: HashMap<Pubkey, Reserve>,
         market: LendingMarket,
-        _rts: HashMap<Pubkey, ReferrerTokenState>,
         loaded_accounts_data: Option<HashMap<Pubkey, Account>>,
     ) -> Result<(), anyhow::Error> {
         info!("Liquidating: Obligation: {:?}", ob);
         info!("Liquidating: Obligation summary: {:?}", ob.to_string());
 
         let (debt_reserve, coll_reserve, lending_market, obligation_state) =
-            self.find_best_reserves(&ob, &reserves, &market, obligation)?;
+            self.find_best_reserves(&ob, obligation, &market)?;
 
         let (liquidate_amount, net_withdraw_liquidity_amount) =
-            self.calculate_liquidation_params(&obligation_state, &lending_market, &coll_reserve, &debt_reserve, &clock)?;
+            self.calculate_liquidation_params(&obligation_state, &lending_market, &coll_reserve, &debt_reserve)?;
 
         let liquidation_instructions = self.build_liquidation_instructions(
             klend_client,
@@ -168,7 +169,6 @@ impl LiquidationEngine {
             &coll_reserve,
             &lending_market,
             &obligation_state,
-            &reserves,
             liquidate_amount,
             net_withdraw_liquidity_amount,
         ).await?;
@@ -176,9 +176,7 @@ impl LiquidationEngine {
         self.execute_liquidation_transaction(
             klend_client,
             liquidation_instructions,
-            &clock,
             &ob,
-            &reserves,
             *obligation,
             loaded_accounts_data,
         ).await?;
@@ -189,11 +187,10 @@ impl LiquidationEngine {
     fn find_best_reserves(
         &self,
         ob: &Obligation,
-        reserves: &HashMap<Pubkey, Reserve>,
-        market: &LendingMarket,
         obligation: &Pubkey,
+        market: &LendingMarket,
     ) -> Result<(StateWithKey<Reserve>, StateWithKey<Reserve>, StateWithKey<LendingMarket>, StateWithKey<Obligation>)> {
-        let debt_res_key = match math::find_best_debt_reserve(&ob.borrows, &reserves) {
+        let debt_res_key = match math::find_best_debt_reserve(&ob.borrows, &self.all_reserves) {
             Some(key) => key,
             None => {
                 error!("No debt reserve found for obligation {}", obligation);
@@ -201,7 +198,7 @@ impl LiquidationEngine {
             }
         };
 
-        let coll_res_key = match math::find_best_collateral_reserve(&ob.deposits, &reserves) {
+        let coll_res_key = match math::find_best_collateral_reserve(&ob.deposits, &self.all_reserves) {
             Some(key) => key,
             None => {
                 error!("No collateral reserve found for obligation {}", obligation);
@@ -209,7 +206,7 @@ impl LiquidationEngine {
             }
         };
 
-        let debt_reserve_state = match reserves.get(&debt_res_key) {
+        let debt_reserve_state = match self.all_reserves.get(&debt_res_key) {
             Some(reserve) => *reserve,
             None => {
                 error!("Debt reserve {} not found in reserves", debt_res_key);
@@ -217,7 +214,7 @@ impl LiquidationEngine {
             }
         };
 
-        let coll_reserve_state = match reserves.get(&coll_res_key) {
+        let coll_reserve_state = match self.all_reserves.get(&coll_res_key) {
             Some(reserve) => *reserve,
             None => {
                 error!("Collateral reserve {} not found in reserves", coll_res_key);
@@ -242,31 +239,30 @@ impl LiquidationEngine {
         lending_market: &StateWithKey<LendingMarket>,
         coll_reserve: &StateWithKey<Reserve>,
         debt_reserve: &StateWithKey<Reserve>,
-        clock: &Clock,
     ) -> Result<(u64, u64)> {
-        self.log_liquidation_info(debt_reserve, coll_reserve, clock);
+        self.log_liquidation_info(debt_reserve, coll_reserve);
 
         let liquidate_amount = self.calculate_liquidate_amount(
-            obligation, lending_market, coll_reserve, debt_reserve, clock
+            obligation, lending_market, coll_reserve, debt_reserve
         )?;
 
         let net_withdraw_liquidity_amount = self.simulate_liquidation_and_get_withdraw_amount(
-            obligation, lending_market, coll_reserve, debt_reserve, clock, liquidate_amount
+            obligation, lending_market, coll_reserve, debt_reserve, liquidate_amount
         )?;
 
         Ok((liquidate_amount, net_withdraw_liquidity_amount))
     }
 
-    fn log_liquidation_info(&self, debt_reserve: &StateWithKey<Reserve>, coll_reserve: &StateWithKey<Reserve>, clock: &Clock) {
-        info!("Liquidating: Clock: {:?}", clock);
+    fn log_liquidation_info(&self, debt_reserve: &StateWithKey<Reserve>, coll_reserve: &StateWithKey<Reserve>) {
+        info!("Liquidating: Clock: {:?}", self.clock.as_ref().unwrap());
         info!("Liquidating: Debt reserve: {:?}, last_update: {:?}, is_stale: {:?}",
               debt_reserve.state.borrow().config.token_info.symbol(),
               debt_reserve.state.borrow().last_update,
-              debt_reserve.state.borrow().last_update.is_stale(clock.slot, PriceStatusFlags::LIQUIDATION_CHECKS));
+              debt_reserve.state.borrow().last_update.is_stale(self.clock.as_ref().unwrap().slot, PriceStatusFlags::LIQUIDATION_CHECKS));
         info!("Liquidating: Coll reserve: {:?}, last_update: {:?}, is_stale: {:?}",
               coll_reserve.state.borrow().config.token_info.symbol(),
               coll_reserve.state.borrow().last_update,
-              coll_reserve.state.borrow().last_update.is_stale(clock.slot, PriceStatusFlags::LIQUIDATION_CHECKS));
+              coll_reserve.state.borrow().last_update.is_stale(self.clock.as_ref().unwrap().slot, PriceStatusFlags::LIQUIDATION_CHECKS));
     }
 
     fn calculate_liquidate_amount(
@@ -275,7 +271,6 @@ impl LiquidationEngine {
         lending_market: &StateWithKey<LendingMarket>,
         coll_reserve: &StateWithKey<Reserve>,
         debt_reserve: &StateWithKey<Reserve>,
-        clock: &Clock,
     ) -> Result<u64> {
         let max_allowed_ltv_override_pct_opt = Some(0);
         let liquidation_swap_slippage_pct = 0_f64;
@@ -285,7 +280,7 @@ impl LiquidationEngine {
             lending_market,
             coll_reserve,
             debt_reserve,
-            clock,
+            self.clock.as_ref().unwrap(),
             max_allowed_ltv_override_pct_opt,
             liquidation_swap_slippage_pct,
         )?;
@@ -307,7 +302,6 @@ impl LiquidationEngine {
         lending_market: &StateWithKey<LendingMarket>,
         coll_reserve: &StateWithKey<Reserve>,
         debt_reserve: &StateWithKey<Reserve>,
-        clock: &Clock,
         liquidate_amount: u64,
     ) -> Result<u64> {
         let deposit_reserves = self.prepare_deposit_reserves(obligation);
@@ -319,7 +313,7 @@ impl LiquidationEngine {
             debt_reserve,
             coll_reserve,
             &mut obligation.state.borrow_mut().clone(),
-            clock,
+            self.clock.as_ref().unwrap(),
             liquidate_amount,
             min_acceptable_received_collateral_amount,
             max_allowed_ltv_override_pct_opt,
@@ -365,7 +359,6 @@ impl LiquidationEngine {
         coll_reserve: &StateWithKey<Reserve>,
         lending_market: &StateWithKey<LendingMarket>,
         obligation: &StateWithKey<Obligation>,
-        reserves: &HashMap<Pubkey, Reserve>,
         liquidate_amount: u64,
         net_withdraw_liquidity_amount: u64,
     ) -> Result<LiquidationInstructions> {
@@ -380,7 +373,7 @@ impl LiquidationEngine {
         // Step 2: Add liquidation instructions
         self.add_liquidation_instructions(
             klend_client, lending_market, debt_reserve, coll_reserve,
-            obligation, reserves, liquidate_amount, &mut ixns
+            obligation, liquidate_amount, &mut ixns
         ).await?;
 
         // Step 3: Add Jupiter swap instructions
@@ -430,7 +423,6 @@ impl LiquidationEngine {
         debt_reserve: &StateWithKey<Reserve>,
         coll_reserve: &StateWithKey<Reserve>,
         obligation: &StateWithKey<Obligation>,
-        reserves: &HashMap<Pubkey, Reserve>,
         liquidate_amount: u64,
         ixns: &mut Vec<Instruction>,
     ) -> Result<()> {
@@ -443,7 +435,7 @@ impl LiquidationEngine {
                 liquidate_amount,
                 0, // min_acceptable_received_collateral_amount
                 Some(0), // max_allowed_ltv_override_pct_opt
-                reserves
+                &self.all_reserves
             )
             .await
             .map_err(|e| {
@@ -567,9 +559,7 @@ impl LiquidationEngine {
         &self,
         klend_client: &Arc<KlendClient>,
         liquidation_instructions: LiquidationInstructions,
-        clock: &Clock,
         ob: &Obligation,
-        reserves: &HashMap<Pubkey, Reserve>,
         obligation_key: Pubkey,
         loaded_accounts_data: Option<HashMap<Pubkey, Account>>,
     ) -> Result<()> {
@@ -609,10 +599,10 @@ impl LiquidationEngine {
 
         match loaded_accounts_data {
             Some(loaded_accounts_data) => {
-                self.execute_with_extra_client(klend_client, &txn, &loaded_accounts_data, clock, &obligation_key).await
+                self.execute_with_extra_client(klend_client, &txn, &loaded_accounts_data, &obligation_key).await
             }
             None => {
-                self.execute_with_local_client(klend_client, &txn, clock, ob, reserves, &obligation_key).await
+                self.execute_with_local_client(klend_client, &txn, ob, &obligation_key).await
             }
         }
     }
@@ -635,7 +625,6 @@ impl LiquidationEngine {
         klend_client: &Arc<KlendClient>,
         txn: &solana_sdk::transaction::VersionedTransaction,
         loaded_accounts_data: &HashMap<Pubkey, Account>,
-        _clock: &Clock,
         obligation_key: &Pubkey,
     ) -> Result<()> {
         info!("Liquidating with extra client");
@@ -654,7 +643,7 @@ impl LiquidationEngine {
         let request = SimulateTransactionRequest {
             data: serde_json::to_vec(txn).unwrap(),
             replaces: replaces,
-            commitment_or_slot: _clock.slot,
+            commitment_or_slot: self.clock.as_ref().unwrap().slot,
             addresses: vec![obligation_key.to_bytes().to_vec()],
         };
 
@@ -684,9 +673,7 @@ impl LiquidationEngine {
         &self,
         klend_client: &Arc<KlendClient>,
         txn: &solana_sdk::transaction::VersionedTransaction,
-        _clock: &Clock,
         ob: &Obligation,
-        reserves: &HashMap<Pubkey, Reserve>,
         obligation_key: &Pubkey,
     ) -> Result<()> {
         info!("Liquidating with normal client");
@@ -702,7 +689,7 @@ impl LiquidationEngine {
                 }
                 Err(e) => {
                     error!("Liquidating: tx error: {:?}", e);
-                    self.handle_transaction_error(klend_client, _clock, ob, reserves, obligation_key).await?;
+                    self.handle_transaction_error(klend_client, ob, obligation_key).await?;
 
                     match klend_client
                         .local_client
@@ -726,9 +713,7 @@ impl LiquidationEngine {
     async fn handle_transaction_error(
         &self,
         klend_client: &Arc<KlendClient>,
-        _clock: &Clock,
         ob: &Obligation,
-        reserves: &HashMap<Pubkey, Reserve>,
         obligation_key: &Pubkey,
     ) -> Result<()> {
         // Fetch newest clock
@@ -742,7 +727,7 @@ impl LiquidationEngine {
 
         info!("Liquidating: new clock after error: {:?}", new_clock);
 
-        Self::dump_liquidation_accounts_static(klend_client, obligation_key, ob, reserves, &new_clock).await?;
+        Self::dump_liquidation_accounts_static(klend_client, obligation_key, ob, &self.all_reserves, &new_clock).await?;
 
         Ok(())
     }
@@ -906,11 +891,8 @@ impl LiquidationEngine {
         match self.liquidate_with_loaded_data(
             klend_client,
             address,
-            self.clock.as_ref().unwrap().clone(),
             obligation.clone(),
-            reserves.clone(),
             lending_market,
-            rts,
             None
         ).await {
             Ok(_) => {
@@ -1515,44 +1497,10 @@ impl LiquidationEngine {
                 ).await?;
 
                 // Refresh obligations map and update subscription if needed
-                self.refresh_obligations_subscription_simple(scope, subscribe_tx).await?;
+                self.refresh_obligations_subscription(scope, subscribe_tx).await?;
             }
         }
 
-        Ok(())
-    }
-
-    async fn refresh_obligations_subscription_simple(
-        &mut self,
-        scope: &str,
-        _subscribe_tx: &mut (impl futures::SinkExt<SubscribeRequest> + Send + Unpin),
-    ) -> anyhow::Result<()> {
-        // Simplified version that doesn't actually refresh subscription for now
-        // to avoid complex type constraints
-        match load_obligations_map(scope.to_string()).await {
-            Ok(updated_obligations_map) => {
-                let updated_obligations_pubkeys = updated_obligations_map.values().flatten().cloned().collect::<Vec<Pubkey>>();
-                let obligations_map_pubkeys = self.market_obligations_map.values().flatten().cloned().collect::<Vec<Pubkey>>();
-                let mut obligations_to_refresh = Vec::new();
-                for pubkey in updated_obligations_pubkeys {
-                    if !obligations_map_pubkeys.contains(&pubkey) {
-                        obligations_to_refresh.push(pubkey);
-                    }
-                }
-
-                if !obligations_to_refresh.is_empty() {
-                    self.subscribing_pubkeys.extend(obligations_to_refresh.clone());
-                    self.market_obligations_map.clear();
-                    self.market_obligations_map.extend(updated_obligations_map);
-                    info!("Successfully loaded {} markets from obligations map", self.market_obligations_map.len());
-                } else {
-                    info!("No new obligations to refresh");
-                }
-            }
-            Err(e) => {
-                error!("Failed to load obligations map: {:?}", e);
-            }
-        }
         Ok(())
     }
 
