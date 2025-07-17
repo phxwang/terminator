@@ -611,7 +611,7 @@ impl KlendClient {
             urlencoding::encode(&txn_b64)
         );
 
-        txn.build_with_budget_and_fee(&[]).await.map_err(Into::into)
+        txn.build_with_budget_and_fee(&[], None).await.map_err(Into::into)
     }
 
     pub async fn wrap_obligation_instruction_with_farms(

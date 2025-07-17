@@ -589,7 +589,7 @@ impl LiquidationEngine {
             urlencoding::encode(&txn_b64)
         );
 
-        let txn = match txn.build_with_budget_and_fee(&[]).await {
+        let txn = match txn.build_with_budget_and_fee(&[], None).await {
             Ok(txn) => txn,
             Err(e) => {
                 error!("Error building transaction: {}", e);
