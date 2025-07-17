@@ -259,8 +259,8 @@ pub async fn refresh_reserves_and_obligation(
         lending_market,
         clock.slot,
         kamino_lending::MaxReservesAsCollateralCheck::Skip,
-        borrow_reserves.into_iter(),
         deposit_reserves.into_iter(),
+        borrow_reserves.into_iter(),
         referrer_states.into_iter(),
     )?;
     Ok(all_oracle_keys)
