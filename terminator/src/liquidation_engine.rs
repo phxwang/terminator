@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, HashSet}, sync::{Arc, RwLock}, time::Duration};
+use std::{collections::{HashMap, HashSet}, sync::{Arc, RwLock}, time::Duration, str::FromStr, env};
 
 use anyhow::Result;
 use colored::Colorize;
@@ -12,6 +12,7 @@ use solana_sdk::{
     address_lookup_table::AddressLookupTableAccount,
     pubkey::Pubkey,
     bs58,
+    hash::Hash,
 };
 use tokio::time::sleep;
 use tracing::{info, warn, debug, error};
@@ -20,8 +21,8 @@ use futures::SinkExt;
 
 use scope::OraclePrices as ScopePrices;
 use anchor_lang::{AccountDeserialize, Discriminator};
-use yellowstone_grpc_proto::prelude::{SubscribeRequest, SubscribeRequestFilterAccounts, SubscribeRequestFilterTransactions, subscribe_update::UpdateOneof, SubscribeUpdate};
-use yellowstone_grpc_proto::geyser::CommitmentLevel;
+use yellowstone_grpc_proto::prelude::{SubscribeRequest, SubscribeRequestFilterAccounts, SubscribeRequestFilterTransactions, SubscribeRequestFilterBlocksMeta, subscribe_update::UpdateOneof, SubscribeUpdate};
+use yellowstone_grpc_proto::geyser::{CommitmentLevel};
 use yellowstone_grpc_proto::tonic;
 
 use bytemuck;
@@ -36,7 +37,7 @@ use crate::{
     },
     math,
     sysvars,
-    swap,
+swap,
     instruction_parser,
     yellowstone_transaction::create_yellowstone_client,
 };
@@ -79,6 +80,10 @@ pub struct LiquidationEngine {
     pub subscribing_pubkeys: Vec<Pubkey>,
     /// Cache for obligations with thread-safe access
     pub shared_obligation_map: Arc<RwLock<HashMap<Pubkey, Obligation>>>,
+    /// Cache for latest blockhash and slot
+    pub latest_blockhash: Option<Hash>,
+    /// Cache for latest slot
+    pub latest_slot: Option<u64>,
 }
 
 impl LiquidationEngine {
@@ -99,6 +104,8 @@ impl LiquidationEngine {
             clock: None,
             subscribing_pubkeys: Vec::new(),
             shared_obligation_map: Arc::new(RwLock::new(HashMap::new())),
+            latest_blockhash: None,
+            latest_slot: None,
         }
     }
 
@@ -131,15 +138,28 @@ impl LiquidationEngine {
                     .await?;
 
                 self.all_reserves = market_accs.reserves;
-                let market = market_accs.lending_market;
+                let mut market = market_accs.lending_market;
                 // todo - don't load all
                 self.all_rts.insert(ob.lending_market, klend_client.fetch_referrer_token_states().await?);
+
+                crate::refresh_market(klend_client,
+                    &ob.lending_market,
+                    &Vec::new(),
+                    &mut self.all_reserves,
+                    &mut market,
+                    self.clock.as_ref().unwrap(),
+                    None,
+                    None,
+                    None).await?;
 
                 Self::dump_liquidation_accounts_static(klend_client, obligation, &ob, &self.all_reserves, self.clock.as_ref().unwrap()).await?;
 
                 (ob, market, None)
             }
         };
+
+        //fetch latest blockhash
+        self.latest_blockhash = Some(klend_client.local_client.client.get_latest_blockhash().await?);
 
         self.preload_swap_instructions(klend_client, obligation, &obligation_data).await?;
 
@@ -148,7 +168,7 @@ impl LiquidationEngine {
         Ok(())
     }
 
-    pub async fn liquidate_with_loaded_data(
+pub async fn liquidate_with_loaded_data(
         &mut self,
         klend_client: &Arc<KlendClient>,
         obligation: &Pubkey,
@@ -589,7 +609,7 @@ impl LiquidationEngine {
             urlencoding::encode(&txn_b64)
         );
 
-        let txn = match txn.build_with_budget_and_fee(&[], None).await {
+        let txn = match txn.build_with_budget_and_fee(&[], self.latest_blockhash.clone()).await {
             Ok(txn) => txn,
             Err(e) => {
                 error!("Error building transaction: {}", e);
@@ -1407,7 +1427,7 @@ impl LiquidationEngine {
         impl futures::SinkExt<SubscribeRequest> + Send + Unpin,
         impl futures::StreamExt<Item = Result<SubscribeUpdate, tonic::Status>> + Send + Unpin
     )> {
-        let endpoint = "ws://198.244.253.218:10000".to_string();
+        let endpoint = env::var("YELLOWSTONE_RPC")?.to_string();
         let x_token = None;
 
         let mut client = create_yellowstone_client(&endpoint, &x_token, 10).await?;
@@ -1419,13 +1439,21 @@ impl LiquidationEngine {
         })?;
         info!("Connected to the gRPC server");
 
+        let mut request_filter = HashMap::new();
+        request_filter.insert(
+            "client".to_string(),
+            SubscribeRequestFilterBlocksMeta {},
+        );
+
+        let blocks_meta = request_filter.clone();
+
         subscribe_tx
             .send(SubscribeRequest {
                 slots: HashMap::new(),
                 accounts,
                 transactions,
                 blocks: HashMap::new(),
-                blocks_meta: HashMap::new(),
+                blocks_meta,
                 commitment: Some(CommitmentLevel::Processed.into()),
                 accounts_data_slice: vec![],
                 transactions_status: HashMap::new(),
@@ -1462,6 +1490,9 @@ impl LiquidationEngine {
                     Some(UpdateOneof::Transaction(transaction)) => {
                         self.handle_transaction_update(transaction).await?;
                     }
+                    Some(UpdateOneof::BlockMeta(block_meta)) => {
+                        self.handle_block_meta_update(block_meta).await?;
+                    }
                     _ => {
                         debug!("Unknown update oneof: {:?}", msg.update_oneof);
                     }
@@ -1471,6 +1502,18 @@ impl LiquidationEngine {
                 break;
             }
         }
+        Ok(())
+    }
+
+    async fn handle_block_meta_update(
+        &mut self,
+        block_meta: yellowstone_grpc_proto::prelude::SubscribeUpdateBlockMeta
+    ) -> anyhow::Result<()> {
+        debug!("Block meta: {:?}", block_meta);
+        //save to class buffer
+        //covert string to Hash
+        self.latest_blockhash = Some(Hash::from_str(&block_meta.blockhash)?);
+        self.latest_slot = Some(block_meta.slot);
         Ok(())
     }
 
