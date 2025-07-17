@@ -141,6 +141,8 @@ impl LiquidationEngine {
             }
         };
 
+        self.preload_swap_instructions(klend_client, obligation, &obligation_data).await?;
+
         self.liquidate_with_loaded_data(klend_client, obligation, obligation_data, market, loaded_accounts_data).await?;
 
         Ok(())
@@ -1056,29 +1058,29 @@ impl LiquidationEngine {
         self.scan_obligations(klend_client, liquidatable_obligations, &reserves, &lending_market, &rts, None).await;
     }
 
-    pub async fn preload_swap_instructions(&mut self, klend_client: &Arc<KlendClient>, obligation_key: &Pubkey, obligation: &Obligation, reserves: &HashMap<Pubkey, Reserve>) -> Result<()> {
-        let debt_res_key = match math::find_best_debt_reserve(&obligation.borrows, &reserves) {
+    pub async fn preload_swap_instructions(&mut self, klend_client: &Arc<KlendClient>, obligation_key: &Pubkey, obligation: &Obligation) -> Result<()> {
+        let debt_res_key = match math::find_best_debt_reserve(&obligation.borrows, &self.all_reserves) {
             Some(key) => key,
             None => {
                 error!("No debt reserve found for obligation {}", obligation_key);
                 return Err(anyhow::anyhow!("No debt reserve found for obligation"));
             }
         };
-        let coll_res_key = match math::find_best_collateral_reserve(&obligation.deposits, &reserves) {
+        let coll_res_key = match math::find_best_collateral_reserve(&obligation.deposits, &self.all_reserves) {
             Some(key) => key,
             None => {
                 error!("No collateral reserve found for obligation {}", obligation_key);
                 return Err(anyhow::anyhow!("No collateral reserve found for obligation"));
             }
         };
-        let debt_reserve_state = match reserves.get(&debt_res_key) {
+        let debt_reserve_state = match self.all_reserves.get(&debt_res_key) {    
             Some(reserve) => *reserve,
             None => {
                 error!("Debt reserve {} not found in reserves", debt_res_key);
                 return Err(anyhow::anyhow!("Debt reserve not found in reserves"));
             }
         };
-        let coll_reserve_state = match reserves.get(&coll_res_key) {
+        let coll_reserve_state = match self.all_reserves.get(&coll_res_key) {
             Some(reserve) => *reserve,
             None => {
                 error!("Collateral reserve {} not found in reserves", coll_res_key);
@@ -1181,7 +1183,7 @@ impl LiquidationEngine {
             let mut obligation = klend_client.fetch_obligation(address).await?;
             self.add_obligation_reserves_to_refresh(&obligation);
 
-            if let Err(e) = self.preload_swap_instructions(klend_client, address, &obligation, reserves).await {
+            if let Err(e) = self.preload_swap_instructions(klend_client, address, &obligation).await {
                 error!("[Liquidation Thread] Error preloading swap instructions for obligation {}: {}", address, e);
             }
 
@@ -1570,8 +1572,7 @@ impl LiquidationEngine {
             info!("Obligation updated: {:?}, obligation: {:?}", pubkey, obligation);
 
             // Clone the reserves to avoid borrowing conflict
-            let all_reserves_clone = self.all_reserves.clone();
-            if let Err(e) = self.preload_swap_instructions(klend_client, pubkey, &obligation, &all_reserves_clone).await {
+            if let Err(e) = self.preload_swap_instructions(klend_client, pubkey, &obligation).await {
                 error!("Failed to preload swap instructions for obligation {}: {}", pubkey, e);
             }
             return Ok(true);
