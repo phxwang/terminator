@@ -130,40 +130,7 @@ impl LiquidationEngine {
                 // todo - don't load all
                 let rts = klend_client.fetch_referrer_token_states().await?;
 
-                let oracle_keys = crate::operations::refresh_reserves_and_obligation(
-                    klend_client,
-                    obligation,
-                    &mut ob,
-                    &mut reserves,
-                    &rts,
-                    &market,
-                    &clock,
-                )
-                .await?;
-
-                let ObligationReserves {
-                    borrow_reserves,
-                    deposit_reserves,
-                } = obligation_reserves(&ob, &reserves)?;
-
-                let mut obligation_reserve_keys = Vec::new();
-                obligation_reserve_keys.extend(borrow_reserves.iter().map(|b| b.key).collect::<Vec<_>>());
-                obligation_reserve_keys.extend(deposit_reserves.iter().map(|d| d.key).collect::<Vec<_>>());
-
-                let mut to_dump_keys = Vec::new();
-                to_dump_keys.extend(oracle_keys);
-                to_dump_keys.push(Clock::id());
-                to_dump_keys.push(*obligation);
-                to_dump_keys.push(ob.lending_market);
-                to_dump_keys.extend(obligation_reserve_keys.clone());
-
-                dump_accounts_to_file(
-                    &mut klend_client.extra_client.clone(),
-                    &to_dump_keys,
-                    clock.slot,
-                    &obligation_reserve_keys,
-                    *obligation,
-                    ob.clone()).await?;
+                Self::dump_liquidation_accounts_static(klend_client, obligation, &ob, &reserves, &clock).await?;
 
                 (ob, clock, reserves, market, rts, None)
             }
@@ -313,9 +280,9 @@ impl LiquidationEngine {
             .deposits
             .iter()
             .filter(|coll| coll.deposit_reserve != Pubkey::default())
-            .filter_map(|coll| {
-                // This is a simplified approach - in real implementation you'd need the actual reserves
-                None // We'll handle this in the calling code
+            .map(|coll| {
+                let reserve = self.all_reserves.get(&coll.deposit_reserve).unwrap();
+                StateWithKey::new(reserve.clone(), coll.deposit_reserve)
             })
             .collect();
 
@@ -471,16 +438,16 @@ impl LiquidationEngine {
                         let out_amount_u64 = out_amount.parse::<u64>().unwrap();
                         let new_in_amount = (in_amount_u64 as f64 * ratio) as u64;
                         let new_out_amount = (out_amount_u64 as f64 * ratio) as u64;
-                        instruction_parser::modify_jupiter_in_amount(ix, new_in_amount);
-                        instruction_parser::modify_jupiter_out_amount(ix, new_out_amount);
+                        let _ = instruction_parser::modify_jupiter_in_amount(ix, new_in_amount);
+                        let _ = instruction_parser::modify_jupiter_out_amount(ix, new_out_amount);
 
                         info!("Liquidating: Modified jupiter in amount: {:?}", instruction_parser::parse_instruction_data(&ix.data, &ix.program_id));
                     }
                 }
 
                 let last_ix = modified_jup_ixs.len() - 1;
-                instruction_parser::modify_jupiter_in_amount(&mut modified_jup_ixs[1], net_withdraw_liquidity_amount);
-                instruction_parser::modify_jupiter_out_amount(&mut modified_jup_ixs[last_ix], liquidate_amount);
+                let _ = instruction_parser::modify_jupiter_in_amount(&mut modified_jup_ixs[1], net_withdraw_liquidity_amount);
+                let _ = instruction_parser::modify_jupiter_out_amount(&mut modified_jup_ixs[last_ix], liquidate_amount);
 
                 info!("Liquidating: Modified jupiter in amount: {:?}", instruction_parser::parse_instruction_data(&modified_jup_ixs[1].data, &modified_jup_ixs[1].program_id));
 
@@ -663,7 +630,7 @@ impl LiquidationEngine {
     async fn handle_transaction_error(
         &self,
         klend_client: &Arc<KlendClient>,
-        clock: &Clock,
+        _clock: &Clock,
         ob: &Obligation,
         reserves: &HashMap<Pubkey, Reserve>,
         obligation_key: &Pubkey,
@@ -679,41 +646,7 @@ impl LiquidationEngine {
 
         info!("Liquidating: new clock after error: {:?}", new_clock);
 
-        let mut all_oracle_keys = HashSet::new();
-        let mut pyth_keys = HashSet::new();
-        let mut switchboard_keys = HashSet::new();
-        let mut scope_keys = HashSet::new();
-
-        refresh_oracle_keys(&reserves, &mut all_oracle_keys, &mut pyth_keys, &mut switchboard_keys, &mut scope_keys);
-
-        let ObligationReserves {
-            borrow_reserves,
-            deposit_reserves,
-        } = obligation_reserves(&ob, &reserves)?;
-
-        let mut obligation_reserve_keys = Vec::new();
-        obligation_reserve_keys.extend(borrow_reserves.iter().map(|b| b.key).collect::<Vec<_>>());
-        obligation_reserve_keys.extend(deposit_reserves.iter().map(|d| d.key).collect::<Vec<_>>());
-
-        // Dump newest slot
-        let mut extra_client = klend_client.extra_client.clone();
-        let mut to_dump_keys = Vec::new();
-        to_dump_keys.push(Clock::id());
-        to_dump_keys.push(*obligation_key);
-        to_dump_keys.push(ob.lending_market);
-        to_dump_keys.extend(obligation_reserve_keys.clone());
-        to_dump_keys.extend(all_oracle_keys);
-
-        if let Err(e) = dump_accounts_to_file(
-            &mut extra_client,
-            &to_dump_keys,
-            new_clock.slot,
-            &obligation_reserve_keys,
-            *obligation_key,
-            ob.clone()
-        ).await {
-            error!("Error dumping accounts to file: {}", e);
-        }
+        Self::dump_liquidation_accounts_static(klend_client, obligation_key, ob, reserves, &new_clock).await?;
 
         Ok(())
     }
@@ -843,7 +776,16 @@ impl LiquidationEngine {
               address.to_string().green(), obligation.to_string().green(), self.clock.as_ref().unwrap().slot);
 
         // Dump accounts
-        self.dump_liquidation_accounts(klend_client, address, obligation, reserves).await?;
+        let klend_client_clone = klend_client.clone();
+        let address_clone = *address;
+        let obligation_clone = obligation.clone();
+        let reserves_clone = reserves.clone();
+        let clock_clone = self.clock.as_ref().unwrap().clone();
+        tokio::spawn(async move {
+            if let Err(e) = Self::dump_liquidation_accounts_static(&klend_client_clone, &address_clone, &obligation_clone, &reserves_clone, &clock_clone).await {
+                error!("[Liquidation Thread] Error dumping liquidation accounts: {} {}", address_clone.to_string().green(), e);
+            }
+        });
 
         // Get the lending market for this obligation
         let lending_market = match self.all_lending_market.get(&obligation.lending_market) {
@@ -888,12 +830,12 @@ impl LiquidationEngine {
         Ok(())
     }
 
-    async fn dump_liquidation_accounts(
-        &self,
+    async fn dump_liquidation_accounts_static(
         klend_client: &Arc<KlendClient>,
         address: &Pubkey,
         obligation: &Obligation,
-        reserves: &HashMap<Pubkey, Reserve>
+        reserves: &HashMap<Pubkey, Reserve>,
+        clock: &Clock
     ) -> Result<()> {
         let mut extra_client = klend_client.extra_client.clone();
         let mut all_oracle_keys = HashSet::new();
@@ -926,7 +868,7 @@ impl LiquidationEngine {
         if let Err(e) = dump_accounts_to_file(
             &mut extra_client,
             &to_dump_keys,
-            self.clock.as_ref().unwrap().slot,
+            clock.slot,
             &obligation_reserve_keys,
             *address,
             obligation.clone()

@@ -308,20 +308,17 @@ impl KlendClient {
         let mut current_content = String::new();
         file.read_to_string(&mut current_content).unwrap();
 
-        let mut lookup_table = None;
-
-        if current_content.is_empty() {
+        let lookup_table = if current_content.is_empty() {
             let lut = self
                 .create_init_reserve_lookup_table(&[], || {
                     thread::sleep(Duration::from_secs(12));
                 })
                 .await
                 .unwrap();
-            lookup_table = Some(lut.clone());
             file.set_len(0).unwrap();
             file.write_all(lut.key.to_string().as_bytes()).unwrap();
             info!("Created new empty lookup table {}", lut.key);
-
+            Some(lut)
         } else {
             let lut_key = Pubkey::from_str(&current_content).unwrap();
             info!("Liquidator lookuptable {:?}", lut_key);
@@ -329,20 +326,21 @@ impl KlendClient {
             let ui_lookup_table: UiLookupTable = UiLookupTable::from(
                 AddressLookupTable::deserialize(&lookup_table_data.data).unwrap(),
             );
-            lookup_table = Some(AddressLookupTableAccount {
+            let lookup_table = AddressLookupTableAccount {
                 key: lut_key,
                 addresses: ui_lookup_table
                     .addresses
                     .iter()
                     .map(|x| Pubkey::from_str(x).unwrap())
                     .collect::<Vec<Pubkey>>(),
-            });
+            };
             info!(
                 "Loaded lookup table {} with {} keys",
                 lut_key,
                 ui_lookup_table.addresses.len()
             );
-        }
+            Some(lookup_table)
+        };
 
         Ok(lookup_table)
     }
