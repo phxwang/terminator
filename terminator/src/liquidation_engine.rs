@@ -878,7 +878,7 @@ impl LiquidationEngine {
         };
 
         // Get the referrer token states for this obligation
-        let rts = match self.all_rts.get(&obligation.lending_market) {
+        let _rts = match self.all_rts.get(&obligation.lending_market) {
             Some(rts) => rts.clone(),
             None => {
                 error!("Referrer token states for market {} not found", obligation.lending_market);
@@ -1441,13 +1441,16 @@ impl LiquidationEngine {
         Ok((subscribe_tx, stream))
     }
 
-    async fn process_websocket_message_stream(
+    async fn process_websocket_message_stream<T>(
         &mut self,
         klend_client: &Arc<KlendClient>,
         scope: String,
-        subscribe_tx: &mut (impl futures::SinkExt<SubscribeRequest> + Send + Unpin),
+        subscribe_tx: &mut T,
         stream: &mut (impl futures::StreamExt<Item = Result<SubscribeUpdate, tonic::Status>> + Send + Unpin)
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<()>
+    where
+        T: futures::SinkExt<SubscribeRequest> + Send + Unpin,
+    {
         while let Some(message) = stream.next().await {
             if let Ok(msg) = message {
                 match msg.update_oneof {
@@ -1469,13 +1472,16 @@ impl LiquidationEngine {
         Ok(())
     }
 
-    async fn handle_account_update(
+    async fn handle_account_update<T>(
         &mut self,
         klend_client: &Arc<KlendClient>,
         scope: &str,
-        subscribe_tx: &mut (impl futures::SinkExt<SubscribeRequest> + Send + Unpin),
+        subscribe_tx: &mut T,
         account_update: yellowstone_grpc_proto::prelude::SubscribeUpdateAccount
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<()>
+        where
+        T: futures::SinkExt<SubscribeRequest> + Unpin,
+        {
         if let Some(account) = account_update.account {
             let pubkey = Pubkey::try_from(account.pubkey.as_slice()).unwrap();
             let data = account.data;
@@ -1749,7 +1755,6 @@ impl LiquidationEngine {
     ) -> anyhow::Result<()>
     where
         T: futures::SinkExt<SubscribeRequest> + Unpin,
-        T::Error: std::fmt::Debug + std::fmt::Display,
     {
         match load_obligations_map(scope.to_string()).await {
             Ok(updated_obligations_map) => {
@@ -1789,7 +1794,7 @@ impl LiquidationEngine {
                         },
                     );
 
-                    if let Err(e) = subscribe_tx.send(
+                    if let Err(_e) = subscribe_tx.send(
                         SubscribeRequest {
                             slots: HashMap::new(),
                             accounts,
@@ -1803,7 +1808,7 @@ impl LiquidationEngine {
                             entry: HashMap::new(),
                         }
                     ).await {
-                        error!("Failed to subscribe: {}", e);
+                        error!("Failed to subscribe to updated obligations");
                     } else {
                         self.market_obligations_map.clear();
                         self.market_obligations_map.extend(updated_obligations_map);
