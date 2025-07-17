@@ -529,6 +529,12 @@ pub async fn liquidate_with_loaded_data(
                 info!("Liquidating: before modify jupiter in amount: {:?}", inst1);
 
                 if modified_jup_ixs.len() > 2 {
+
+                    for ix in modified_jup_ixs.iter_mut() {
+                        let inst = instruction_parser::parse_instruction_data(&ix.data, &ix.program_id);
+                        info!("Liquidating: before modify jupiter in amount, parsed: {:?}", inst);
+                    }
+
                     let in_amount = inst1.parsed_fields.iter().find(|f| f.name == "in_amount").unwrap().value.to_string();
                     let ratio = net_withdraw_liquidity_amount as f64 / in_amount.parse::<u64>().unwrap() as f64;
 
