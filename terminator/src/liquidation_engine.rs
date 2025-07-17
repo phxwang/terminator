@@ -32,7 +32,7 @@ use crate::{
     client::KlendClient,
     model::StateWithKey,
     operations::{
-        obligation_reserves, referrer_token_states_of_obligation,
+        obligation_reserves, referrer_token_states_of_obligation, refresh_reserves_and_obligation,
         ObligationReserves,
     },
     math,
@@ -128,7 +128,7 @@ impl LiquidationEngine {
                 self.clock = Some(sysvars::clock(&klend_client.local_client.client).await?);
 
                 // Reload accounts
-                let ob = klend_client.fetch_obligation(obligation).await?;
+                let mut ob = klend_client.fetch_obligation(obligation).await?;
 
                 info!("Obligation before refresh: {:?}", ob);
                 info!("Obligation summary before refresh: {:?}", ob.to_string());
@@ -138,19 +138,12 @@ impl LiquidationEngine {
                     .await?;
 
                 self.all_reserves = market_accs.reserves;
-                let mut market = market_accs.lending_market;
+                let market = market_accs.lending_market;
                 // todo - don't load all
-                self.all_rts.insert(ob.lending_market, klend_client.fetch_referrer_token_states().await?);
+                let referrer_token_states = klend_client.fetch_referrer_token_states().await?;
+                self.all_rts.insert(ob.lending_market, referrer_token_states.clone());
 
-                crate::refresh_market(klend_client,
-                    &ob.lending_market,
-                    &Vec::new(),
-                    &mut self.all_reserves,
-                    &mut market,
-                    self.clock.as_ref().unwrap(),
-                    None,
-                    None,
-                    None).await?;
+                refresh_reserves_and_obligation(klend_client, &obligation, &mut ob, &mut self.all_reserves, &referrer_token_states, &market, self.clock.as_ref().unwrap()).await?;
 
                 Self::dump_liquidation_accounts_static(klend_client, obligation, &ob, &self.all_reserves, self.clock.as_ref().unwrap()).await?;
 
