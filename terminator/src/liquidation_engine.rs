@@ -159,7 +159,7 @@ impl LiquidationEngine {
 
         self.preload_swap_instructions(klend_client, obligation, &obligation_data).await?;
 
-        self.liquidate_with_loaded_data(klend_client, obligation, obligation_data, market, loaded_accounts_data).await?;
+        self.liquidate_with_loaded_data(klend_client, obligation, &mut obligation_data.clone(), market, loaded_accounts_data).await?;
 
         Ok(())
     }
@@ -167,8 +167,8 @@ impl LiquidationEngine {
 pub async fn liquidate_with_loaded_data(
         &mut self,
         klend_client: &Arc<KlendClient>,
-        obligation: &Pubkey,
-        ob: Obligation,
+        obligation_key: &Pubkey,
+        ob: &mut Obligation,
         market: LendingMarket,
         loaded_accounts_data: Option<HashMap<Pubkey, Account>>,
     ) -> Result<(), anyhow::Error> {
@@ -176,7 +176,7 @@ pub async fn liquidate_with_loaded_data(
         info!("Liquidating: Obligation summary: {:?}", ob.to_string());
 
         let (debt_reserve, coll_reserve, lending_market, obligation_state) =
-            self.find_best_reserves(&ob, obligation, &market)?;
+            self.find_best_reserves(ob, obligation_key, &market)?;
 
         let (liquidate_amount, net_withdraw_liquidity_amount) =
             self.calculate_liquidation_params(&obligation_state, &lending_market, &coll_reserve, &debt_reserve)?;
@@ -193,7 +193,7 @@ pub async fn liquidate_with_loaded_data(
             Ok(instructions) => instructions,
             Err(e) => {
                 error!("Error building liquidation instructions: {}", e);
-                self.obligation_cooldown.insert(*obligation, self.clock.as_ref().unwrap().slot);
+                self.obligation_cooldown.insert(*obligation_key, self.clock.as_ref().unwrap().slot);
                 return Ok(());
             }
         };
@@ -201,8 +201,8 @@ pub async fn liquidate_with_loaded_data(
         self.execute_liquidation_transaction(
             klend_client,
             liquidation_instructions,
-            &ob,
-            *obligation,
+            ob,
+            *obligation_key,
             loaded_accounts_data,
         ).await?;
 
@@ -589,7 +589,7 @@ pub async fn liquidate_with_loaded_data(
         &mut self,
         klend_client: &Arc<KlendClient>,
         liquidation_instructions: LiquidationInstructions,
-        ob: &Obligation,
+        ob: &mut Obligation,
         obligation_key: Pubkey,
         loaded_accounts_data: Option<HashMap<Pubkey, Account>>,
     ) -> Result<()> {
@@ -703,7 +703,7 @@ pub async fn liquidate_with_loaded_data(
         &mut self,
         klend_client: &Arc<KlendClient>,
         txn: &solana_sdk::transaction::VersionedTransaction,
-        ob: &Obligation,
+        ob: &mut Obligation,
         obligation_key: &Pubkey,
     ) -> Result<()> {
         info!("Liquidating with normal client");
@@ -745,7 +745,7 @@ pub async fn liquidate_with_loaded_data(
     async fn handle_transaction_error(
         &mut self,
         klend_client: &Arc<KlendClient>,
-        ob: &Obligation,
+        ob: &mut Obligation,
         obligation_key: &Pubkey,
     ) -> Result<()> {
         // Fetch newest clock
@@ -761,9 +761,10 @@ pub async fn liquidate_with_loaded_data(
 
         Self::dump_liquidation_accounts_static(klend_client, obligation_key, ob, &self.all_reserves, &new_clock).await?;
 
-        //refresh obligation in obligation_map
-        let obligation = klend_client.fetch_obligation(obligation_key).await?;
-        self.obligation_map.insert(*obligation_key, obligation);
+        //copy data from new_obligation to ob
+        let new_obligation = klend_client.fetch_obligation(obligation_key).await?;
+        *ob = new_obligation;
+
         info!("Liquidating: Refreshing obligation in obligation_map {:?}, {:?}", obligation_key, self.obligation_map.get(obligation_key).unwrap().to_string());
         
         Ok(())
@@ -887,7 +888,7 @@ pub async fn liquidate_with_loaded_data(
         &mut self,
         klend_client: &Arc<KlendClient>,
         address: &Pubkey,
-        obligation: &Obligation,
+        obligation: &mut Obligation,
         reserves: &HashMap<Pubkey, Reserve>
     ) -> Result<()> {
         // Check cooldown
@@ -936,7 +937,7 @@ pub async fn liquidate_with_loaded_data(
         match self.liquidate_with_loaded_data(
             klend_client,
             address,
-            obligation.clone(),
+            obligation,
             lending_market,
             None
         ).await {
