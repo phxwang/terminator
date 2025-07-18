@@ -759,7 +759,7 @@ impl KlendClient {
                 info!("pre_ixs refresh_obligation_farms {:?}", farm);
 
                 pre_instructions.push(refresh_farms_ix.clone());
-                //post_instructions.push(refresh_farms_ix);
+                post_instructions.push(refresh_farms_ix);
             }
         }
 
