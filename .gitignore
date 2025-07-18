@@ -28,3 +28,4 @@ logs/
 /config/routing_config.json
 rust_liquidator.json
 /*.json
+/solana-release
