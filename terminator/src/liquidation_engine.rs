@@ -84,6 +84,8 @@ pub struct LiquidationEngine {
     pub latest_blockhash: Option<Hash>,
     /// Cache for latest slot
     pub latest_slot: Option<u64>,
+    /// ObligationCooldown
+    pub obligation_cooldown: HashMap<Pubkey, u64>,
 }
 
 impl LiquidationEngine {
@@ -106,6 +108,7 @@ impl LiquidationEngine {
             shared_obligation_map: Arc::new(RwLock::new(HashMap::new())),
             latest_blockhash: None,
             latest_slot: None,
+            obligation_cooldown: HashMap::new(),
         }
     }
 
@@ -190,6 +193,7 @@ pub async fn liquidate_with_loaded_data(
             Ok(instructions) => instructions,
             Err(e) => {
                 error!("Error building liquidation instructions: {}", e);
+                self.obligation_cooldown.insert(*obligation, self.clock.as_ref().unwrap().slot);
                 return Ok(());
             }
         };
@@ -730,6 +734,8 @@ pub async fn liquidate_with_loaded_data(
                                 error!("Liquidating: Simulation error: {:?}", e);
                             }
                         };
+
+                    self.obligation_cooldown.insert(*obligation_key, self.clock.as_ref().unwrap().slot);
                 }
             };
 
@@ -884,6 +890,14 @@ pub async fn liquidate_with_loaded_data(
         obligation: &Obligation,
         reserves: &HashMap<Pubkey, Reserve>
     ) -> Result<()> {
+        // Check cooldown
+        if let Some(cooldown) = self.obligation_cooldown.get(address) {
+            if *cooldown > &self.clock.as_ref().unwrap().slot - 1200 {
+                info!("[Liquidation Thread] Obligation is on cooldown: {} {}, cooldown start slot: {}", address.to_string().green(), obligation.to_string().green(), cooldown);
+                return Ok(());
+            }
+        }
+
         info!("[Liquidation Thread] Liquidating obligation start: pubkey: {}, obligation: {}, slot: {}",
               address.to_string().green(), obligation.to_string().green(), self.clock.as_ref().unwrap().slot);
 
