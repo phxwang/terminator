@@ -582,7 +582,7 @@ pub async fn liquidate_with_loaded_data(
     }
 
     async fn execute_liquidation_transaction(
-        &self,
+        &mut self,
         klend_client: &Arc<KlendClient>,
         liquidation_instructions: LiquidationInstructions,
         ob: &Obligation,
@@ -696,7 +696,7 @@ pub async fn liquidate_with_loaded_data(
     }
 
     async fn execute_with_local_client(
-        &self,
+        &mut self,
         klend_client: &Arc<KlendClient>,
         txn: &solana_sdk::transaction::VersionedTransaction,
         ob: &Obligation,
@@ -737,7 +737,7 @@ pub async fn liquidate_with_loaded_data(
     }
 
     async fn handle_transaction_error(
-        &self,
+        &mut self,
         klend_client: &Arc<KlendClient>,
         ob: &Obligation,
         obligation_key: &Pubkey,
@@ -755,6 +755,11 @@ pub async fn liquidate_with_loaded_data(
 
         Self::dump_liquidation_accounts_static(klend_client, obligation_key, ob, &self.all_reserves, &new_clock).await?;
 
+        //refresh obligation in obligation_map
+        let obligation = klend_client.fetch_obligation(obligation_key).await?;
+        self.obligation_map.insert(*obligation_key, obligation);
+        info!("Liquidating: Refreshing obligation in obligation_map {:?}, {:?}", obligation_key, self.obligation_map.get(obligation_key).unwrap().to_string());
+        
         Ok(())
     }
 
