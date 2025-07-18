@@ -178,7 +178,7 @@ pub async fn liquidate_with_loaded_data(
         let (liquidate_amount, net_withdraw_liquidity_amount) =
             self.calculate_liquidation_params(&obligation_state, &lending_market, &coll_reserve, &debt_reserve)?;
 
-        let liquidation_instructions = self.build_liquidation_instructions(
+        let liquidation_instructions = match self.build_liquidation_instructions(
             klend_client,
             &debt_reserve,
             &coll_reserve,
@@ -186,7 +186,13 @@ pub async fn liquidate_with_loaded_data(
             &obligation_state,
             liquidate_amount,
             net_withdraw_liquidity_amount,
-        ).await?;
+        ).await {
+            Ok(instructions) => instructions,
+            Err(e) => {
+                error!("Error building liquidation instructions: {}", e);
+                return Ok(());
+            }
+        };
 
         self.execute_liquidation_transaction(
             klend_client,
@@ -1117,7 +1123,7 @@ pub async fn liquidate_with_loaded_data(
             Ok(result) => result,
             Err(e) => {
                 error!("Error getting swap instructions for obligation {}: {}", obligation_key, e);
-                return Err(e.into());
+                return Ok(());
             }
         };
 
