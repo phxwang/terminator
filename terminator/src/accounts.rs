@@ -119,8 +119,15 @@ pub async fn market_and_reserve_accounts(
 
     info!("load {} reserves from market: {}", reserves.len(), lending_market);
 
-    for reserve_key in reserves.keys() {
+    for (reserve_key, reserve) in reserves.iter() {
         client.check_and_add_to_custom_lookup_table(*reserve_key).await?;
+        //check reserve farm_collateral and farm_debt if not default key
+        if reserve.farm_collateral != Pubkey::default() {
+            client.check_and_add_to_custom_lookup_table(reserve.farm_collateral).await?;
+        }
+        if reserve.farm_debt != Pubkey::default() {
+            client.check_and_add_to_custom_lookup_table(reserve.farm_debt).await?;
+        }
     }
 
     Ok(MarketAccounts {
