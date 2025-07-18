@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tracing::warn;
 
-use anchor_client::solana_sdk::{instruction::{AccountMeta, Instruction}, pubkey::Pubkey, signature::Keypair};
+use anchor_client::solana_sdk::{instruction::Instruction, pubkey::Pubkey, signature::Keypair};
 use anchor_lang::{prelude::Rent, system_program::System, Id, InstructionData, ToAccountMetas};
 use anchor_spl::token::Token;
 use tracing::debug;
@@ -172,24 +172,29 @@ pub fn refresh_obligation_farm_for_reserve_ix(
     let reserve_state = reserve.state.borrow();
     let reserve_address = reserve.key;
     let lending_market_authority =
-        kamino_lending::utils::seeds::pda::lending_market_auth(&reserve_state.lending_market);
+    kamino_lending::utils::seeds::pda::lending_market_auth(&reserve_state.lending_market);
 
-        let accts = vec![
-        AccountMeta::new_readonly(owner.pubkey(), true), // crank
-        AccountMeta::new(obligation, false), // obligation
-        AccountMeta::new_readonly(reserve_state.lending_market, false), // lending_market
-        AccountMeta::new_readonly(lending_market_authority, false), // lending_market_authority
-        AccountMeta::new_readonly(reserve_address, false), // reserve
-        AccountMeta::new(user_farm_state, false), // obligation_farm_user_state
-        AccountMeta::new(reserve_farm_state, false), // reserve_farm_state
-        AccountMeta::new_readonly(Rent::id(), false), // rent
-        AccountMeta::new_readonly(farms::id(), false), // farms_program
-        AccountMeta::new_readonly(System::id(), false), // system_program
-    ];
+    let base_accts = kamino_lending::accounts::RefreshObligationFarmsForReserveBase {
+        obligation,
+        lending_market_authority,
+        reserve: reserve_address,
+        reserve_farm_state,
+        obligation_farm_user_state: user_farm_state,
+        lending_market: reserve_state.lending_market,
+        
+    };
+
+    let accts = kamino_lending::accounts::RefreshObligationFarmsForReserve {
+        crank: owner.pubkey(),
+        base_accounts: base_accts,
+        farms_program: farms::id(),
+        rent: Rent::id(),
+        system_program: System::id(),
+    };
 
     let instruction = Instruction {
         program_id: *program_id,
-        accounts: accts,
+        accounts: accts.to_account_metas(None),
         data: kamino_lending::instruction::RefreshObligationFarmsForReserve {
             mode: farms_mode as u8,
         }
