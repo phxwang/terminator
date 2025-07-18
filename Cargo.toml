@@ -5,6 +5,48 @@ members = ["terminator"]
 resolver = "2"
 
 [profile.release]
-lto = "thin"
+# 链接时优化 - 使用 "fat" 获得最佳性能，但编译时间更长
+lto = "fat"
+# 减少代码生成单元以获得更好的优化
 codegen-units = 1
-overflow-checks = true
+# 在生产环境中可以关闭溢出检查以获得更好性能
+overflow-checks = false
+# 启用所有优化
+opt-level = 3
+# 去除调试信息以减小二进制大小
+debug = false
+# 启用恐慌时立即中止，减小二进制大小
+panic = "abort"
+# 去除符号表
+strip = true
+
+# 高性能 profile - 用于极致性能优化
+[profile.performance]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+debug = false
+panic = "abort"
+strip = true
+overflow-checks = false
+# 启用更激进的优化
+incremental = false
+
+# 开发时的快速编译 profile
+[profile.dev-fast]
+inherits = "dev"
+opt-level = 1
+debug = true
+incremental = true
+
+# 针对特定 CPU 的优化配置
+[profile.native]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+debug = false
+panic = "abort"
+strip = true
+overflow-checks = false
