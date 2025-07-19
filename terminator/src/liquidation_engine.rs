@@ -765,7 +765,9 @@ pub async fn liquidate_with_loaded_data(
         let new_obligation = klend_client.fetch_obligation(obligation_key).await?;
         *ob = new_obligation;
 
-        self.preload_swap_instructions(klend_client, obligation_key, ob).await?;
+        if let Err(e) = self.preload_swap_instructions(klend_client, obligation_key, &ob).await {
+            error!("[Liquidation Thread] Error preloading swap instructions for obligation {}: {}", obligation_key, e);
+        }
 
         info!("Liquidating: Refreshing obligation in obligation_map {:?}, {:?}", obligation_key, self.obligation_map.get(obligation_key).unwrap().to_string());
         
