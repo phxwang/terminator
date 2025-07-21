@@ -2,7 +2,7 @@
 cargo build --profile performance
 
 echo "starting crank"
-./target/performance/klend-terminator --log-file logs/crank.log crank 1> /dev/null 2>&1 &
+./target/performance/klend-terminator crank 1> /dev/null 2>&1 &
 echo "crank started"
 sleep 5
 echo "starting big liquidate"

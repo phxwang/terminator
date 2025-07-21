@@ -769,7 +769,7 @@ pub async fn liquidate_with_loaded_data(
             error!("[Liquidation Thread] Error preloading swap instructions for obligation {}: {}", obligation_key, e);
         }
 
-        info!("Liquidating: Refreshing obligation in obligation_map {:?}, {:?}", obligation_key, self.obligation_map.get(obligation_key).unwrap().to_string());
+        //info!("Liquidating: Refreshing obligation in obligation_map {:?}, {:?}", obligation_key, self.obligation_map.get(obligation_key).unwrap().to_string());
         
         Ok(())
     }
