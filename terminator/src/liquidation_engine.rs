@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, HashSet}, sync::{Arc, RwLock}, time::Duration, str::FromStr, env};
+use std::{collections::{HashMap, HashSet}, sync::Arc, time::Duration, str::FromStr, env};
 
 use anyhow::Result;
 use colored::Colorize;
@@ -79,7 +79,7 @@ pub struct LiquidationEngine {
     /// Cache for subscribing pubkeys
     pub subscribing_pubkeys: Vec<Pubkey>,
     /// Cache for obligations with thread-safe access
-    pub shared_obligation_map: Arc<RwLock<HashMap<Pubkey, Obligation>>>,
+    // pub shared_obligation_map: Arc<RwLock<HashMap<Pubkey, Obligation>>>,
     /// Cache for latest blockhash and slot
     pub latest_blockhash: Option<Hash>,
     /// Cache for latest slot
@@ -105,7 +105,6 @@ impl LiquidationEngine {
             reserves_prices: HashMap::new(),
             clock: None,
             subscribing_pubkeys: Vec::new(),
-            shared_obligation_map: Arc::new(RwLock::new(HashMap::new())),
             latest_blockhash: None,
             latest_slot: None,
             obligation_cooldown: HashMap::new(),
@@ -769,7 +768,7 @@ pub async fn liquidate_with_loaded_data(
             error!("[Liquidation Thread] Error preloading swap instructions for obligation {}: {}", obligation_key, e);
         }
 
-        //info!("Liquidating: Refreshing obligation in obligation_map {:?}, {:?}", obligation_key, self.obligation_map.get(obligation_key).unwrap().to_string());
+        info!("Liquidating: Refreshing obligation in obligation_map {:?}, {:?}", obligation_key, ob.to_string());
         
         Ok(())
     }
@@ -1637,10 +1636,8 @@ pub async fn preload_swap_instructions(&mut self, klend_client: &Arc<KlendClient
                     return Ok(true);
                 }
             };
-            let mut obligation_map_write = self.shared_obligation_map.write().unwrap();
-            obligation_map_write.insert(*pubkey, obligation.clone());
-            drop(obligation_map_write); // Release the lock early
-            info!("Obligation updated: {:?}, obligation: {:?}", pubkey, obligation);
+            self.obligation_map.insert(*pubkey, obligation.clone());
+            info!("Obligation updated: {:?}, obligation: {:?} \n {}", pubkey, obligation, obligation.to_string());
 
             // Clone the reserves to avoid borrowing conflict
             if let Err(e) = self.preload_swap_instructions(klend_client, pubkey, &obligation).await {
