@@ -548,7 +548,7 @@ pub async fn liquidate_with_loaded_data(
                     for ix in modified_jup_ixs.iter_mut().skip(first_ix_id) {
                         let inst = instruction_parser::parse_instruction_data(&ix.data, &ix.program_id);
                         info!("Liquidating: before modify jupiter in amount, parsed: {:?}", inst);
-                        
+
                         let in_amount = inst.parsed_fields.iter().find(|f| f.name == "in_amount").unwrap().value.to_string();
                         let out_amount = inst.parsed_fields.iter().find(|f| f.name == "quoted_out_amount").unwrap().value.to_string();
                         let in_amount_u64 = in_amount.parse::<u64>().unwrap();
@@ -709,7 +709,7 @@ pub async fn liquidate_with_loaded_data(
 
         match klend_client
             .local_client
-            .send_retry_and_confirm_transaction(txn.clone(), None, false)
+            .send_retry_and_confirm_transaction(txn.clone(), None, true)
             .await
             {
                 Ok(sig) => {
@@ -717,9 +717,6 @@ pub async fn liquidate_with_loaded_data(
                     info!("Liquidating: tx res: {:?}", sig.1);
                 }
                 Err(e) => {
-                    error!("Liquidating: tx error: {:?}", e);
-                    self.handle_transaction_error(klend_client, ob, obligation_key).await?;
-
                     match klend_client
                         .local_client
                         .client
@@ -733,6 +730,8 @@ pub async fn liquidate_with_loaded_data(
                                 error!("Liquidating: Simulation error: {:?}", e);
                             }
                         };
+                    error!("Liquidating: tx error: {:?}", e);
+                    self.handle_transaction_error(klend_client, ob, obligation_key).await?;
 
                     self.obligation_cooldown.insert(*obligation_key, self.clock.as_ref().unwrap().slot);
                 }
@@ -769,7 +768,7 @@ pub async fn liquidate_with_loaded_data(
         }
 
         info!("Liquidating: Refreshing obligation in obligation_map {:?}, {:?}", obligation_key, ob.to_string());
-        
+
         Ok(())
     }
 
@@ -1120,7 +1119,7 @@ pub async fn preload_swap_instructions(&mut self, klend_client: &Arc<KlendClient
                 return Err(anyhow::anyhow!("No collateral reserve found for obligation"));
             }
         };
-        let debt_reserve_state = match self.all_reserves.get(&debt_res_key) {    
+        let debt_reserve_state = match self.all_reserves.get(&debt_res_key) {
             Some(reserve) => *reserve,
             None => {
                 error!("Debt reserve {} not found in reserves", debt_res_key);
