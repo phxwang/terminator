@@ -492,6 +492,13 @@ pub async fn liquidate_with_loaded_data(
             liquidate_amount,
         ).await?;
 
+        //show jupiter swap instructions
+        for ix in jup_ixs.iter() {
+            if ix.program_id == compute_budget::id() {
+                info!("Liquidating: Jupiter swap instruction: {:?}", instruction_parser::parse_instruction_data(&ix.data, &ix.program_id));
+            }
+        }
+
         info!("Liquidating: Jupiter swap ixns count: {:?}", jup_ixs.len());
         ixns.extend_from_slice(&jup_ixs.into_iter().filter(|ix| ix.program_id != compute_budget::id()).collect::<Vec<_>>());
 
@@ -610,6 +617,8 @@ pub async fn liquidate_with_loaded_data(
             txn = txn.add_lookup_table(lut);
         }
 
+        info!("Liquidating: txn.total_budget: {:?}", txn.get_total_budget());
+
         let txn_b64 = txn.to_base64();
         info!(
             "Liquidating: Simulation: https://explorer.solana.com/tx/inspector?message={}",
@@ -715,9 +724,33 @@ pub async fn liquidate_with_loaded_data(
                 Ok(sig) => {
                     info!("Liquidating: tx sent: {:?}", sig.0);
                     info!("Liquidating: tx res: {:?}", sig.1);
+                    match sig.1 {
+                        Some(err) => {
+                            error!("Liquidating: tx error: {:?}", err);
+                            self.handle_transaction_error(klend_client, txn, ob, obligation_key).await?;
+                        }
+                        None => {
+                            info!("Liquidating: tx success");
+                        }
+                    }
                 }
                 Err(e) => {
-                    match klend_client
+                    error!("Liquidating: tx error: {:?}", e);
+                    self.handle_transaction_error(klend_client, txn, ob, obligation_key).await?;
+                }
+            };
+
+        Ok(())
+    }
+
+    async fn handle_transaction_error(
+        &mut self,
+        klend_client: &Arc<KlendClient>,
+        txn: &solana_sdk::transaction::VersionedTransaction,
+        ob: &mut Obligation,
+        obligation_key: &Pubkey,
+    ) -> Result<()> {
+        match klend_client
                         .local_client
                         .client
                         .simulate_transaction(txn)
@@ -730,22 +763,6 @@ pub async fn liquidate_with_loaded_data(
                                 error!("Liquidating: Simulation error: {:?}", e);
                             }
                         };
-                    error!("Liquidating: tx error: {:?}", e);
-                    self.handle_transaction_error(klend_client, ob, obligation_key).await?;
-
-                    self.obligation_cooldown.insert(*obligation_key, self.clock.as_ref().unwrap().slot);
-                }
-            };
-
-        Ok(())
-    }
-
-    async fn handle_transaction_error(
-        &mut self,
-        klend_client: &Arc<KlendClient>,
-        ob: &mut Obligation,
-        obligation_key: &Pubkey,
-    ) -> Result<()> {
         // Fetch newest clock
         let new_clock = match sysvars::get_clock(&klend_client.local_client.client).await {
             Ok(clock) => clock,
@@ -768,6 +785,9 @@ pub async fn liquidate_with_loaded_data(
         }
 
         info!("Liquidating: Refreshing obligation in obligation_map {:?}, {:?}", obligation_key, ob.to_string());
+
+
+        self.obligation_cooldown.insert(*obligation_key, self.clock.as_ref().unwrap().slot);
 
         Ok(())
     }
